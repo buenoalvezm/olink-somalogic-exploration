@@ -1,0 +1,83 @@
+---
+title: "Untitled"
+format: html
+---
+
+# Set up
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(tidymodels)
+library(embed)
+
+olink_data <- read_tsv("../olink_data/phase2_unbridged_data.tsv")
+soma_data <- read_tsv("../soma_data/soma_data.tsv")
+manifest <- read_excel("../metadata/samples_2025-05-12.xlsx") 
+```
+
+# Samples subset
+
+```{r}
+soma_id <- 
+    soma_data |> 
+    filter(!is.na(DAid)) |> 
+    distinct(DAid)
+
+meta <- 
+    manifest |> 
+    filter(DAid %in% soma_id$DAid) |> 
+    select(DAid, Cohort, Diagnose, Disease, Age, Sex, BMI)
+
+data_olink <- 
+    olink_data |> 
+    filter(DAid %in% soma_id$DAid)
+
+data_soma <- 
+    soma_data |> 
+    mutate(RFU = log2(RFU))
+```
+
+# UMAP
+
+```{r}
+umap_olink <- do_umap(data = data_olink, wide = F)
+umap_soma <- do_umap(data = data_soma, wide = F)
+
+umap_combined <- 
+    umap_olink |> 
+    mutate(Platform = "Olink") |> 
+    bind_rows(umap_soma |> 
+    mutate(Platform = "Somalogic"))
+
+umap_combined |> 
+    left_join(meta, by = "DAid") |> 
+    ggplot(aes(UMAP1, UMAP2, color = Disease)) +
+    geom_point() +
+    facet_wrap(~Platform) +
+    theme_hpa()
+```
+
+
+# ANOVA
+
+```{r}
+
+```
+# ML (separate)
+
+```{r}
+
+```
+
+# ML (combined)
+
+```{r}
+
+```
+# Age prediction Soma/Olink
+
+
+```{r}
+
+```
