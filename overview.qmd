@@ -84,11 +84,57 @@ disease_n |>
 
 ggsave(savepath("disease_n.png"), h = 8, w =7)
 ```
+
+# Overlapping proteins
+
+```{r}
+ht_assays <- 
+  data_ht_all |> 
+  distinct(Assay) |> 
+  pull()
+
+soma_assays <- 
+  data_soma_all |> 
+  distinct(EntrezGeneSymbol) |> 
+  pull()
+
+overlapping_assays <- intersect(ht_assays, soma_assays)
+length(overlapping_assays)
+```
+
+# Aptamers per protein
+
+```{r}
+data_soma_all |> 
+    distinct(EntrezGeneSymbol, Assay) |> 
+    filter(EntrezGeneSymbol %in% overlapping_assays) |> 
+    count(EntrezGeneSymbol, name = "n_aptamers") |> 
+    arrange(-n_aptamers) |> 
+    filter(n_aptamers > 1) |> 
+    count(n_aptamers, name = "n_proteins") |> 
+    mutate(n_aptamers = factor(n_aptamers)) |> 
+    ggplot(aes(n_aptamers, n_proteins)) + 
+    geom_col() +
+    geom_text(aes(label = n_proteins, y = n_proteins + 10)) +
+    labs(x = "Number of aptamers", y = "Number of proteins") +
+    theme_hpa()
+ggsave(savepath("n_aptamers_protein.png"), h = 5, w =5)
+
+plot_boxplot(platform = "Somalogic", type = "aptamer", protein = "C3")
+plot_boxplot(platform = "Somalogic", type = "aptamer", protein = "VEGFA")
+```
 # UMAP
 
 ```{r}
+soma_dat <- 
+    data_soma |> 
+    rename(NPX = RFU) |> 
+    select(DAid, Assay, NPX) |> 
+    filter(!is.na(DAid)) |> 
+    mutate(NPX = ifelse(NPX == -Inf, 0, NPX))
+
 umap_olink <- do_umap(data = data_olink, wide = F)
-umap_soma <- do_umap(data = data_soma, wide = F)
+umap_soma <- do_umap(data = soma_dat, wide = F)
 
 umap_combined <- 
     umap_olink |> 
@@ -97,11 +143,20 @@ umap_combined <-
     mutate(Platform = "Somalogic"))
 
 umap_combined |> 
-    left_join(meta, by = "DAid") |> 
-    ggplot(aes(UMAP1, UMAP2, color = Disease)) +
+    left_join(meta, by = c("Sample" ="DAid")) |> 
+    ggplot(aes(UMAP1, UMAP2, color = Class)) +
     geom_point() +
-    facet_wrap(~Platform) +
+    facet_wrap(~Platform, scales = "free") +
+    scale_color_manual(values = pal_class) +
     theme_hpa()
+
+ggsave(savepath("umap_olink_soma.png"), h = 5, w = 10)
+
+data_soma |> 
+    filter(Assay == "seq.25302.6") |> 
+    left_join(manifest, by = "DAid") |> 
+    ggplot(aes(Disease, RFU)) +
+    geom_quasirandom()
 ```
 
 
@@ -115,7 +170,10 @@ data_anova_olink <-
   select(DAid, Assay, NPX) %>%
   left_join(meta |>
               select(DAid, Disease, Age, Sex, BMI), by = "DAid") |>
-  mutate(BMI = ifelse(BMI == 0, NA, BMI))
+  mutate(BMI = ifelse(BMI == 0, NA, BMI)) |> 
+  filter(!Disease %in% c("Healthy - 4 (BAMSE)", "Healthy - 8 (BAMSE)", "Healthy - 16 (BAMSE)", "Healthy - 24 (BAMSE)", "Pregnancy")) |> 
+    mutate(Disease = factor(Disease),
+  BMI = as.numeric(BMI)) 
 
 #saveRDS(data_anova, savepath_data("ANOVA", "anova_dat.rds"))
 
@@ -123,6 +181,17 @@ data_anova_olink <-
 anova_olink <-
   map_df(unique(data_anova_olink$Assay), function(protein) {
     do_anova(df = data_anova_olink,
+             protein = protein)
+  })
+
+df_protein <- filter(data_anova_olink, Assay == "GFAP")
+model <- lm(NPX ~ Age + Sex + BMI + Disease, data = df_protein)
+alias(model)
+
+
+anova_check_olink <-
+  map_df(unique(data_anova_olink$Assay), function(protein) {
+    do_anova_check(df = data_anova_olink,
              protein = protein)
   })
 
@@ -134,17 +203,22 @@ anova_olink_adj <-
   relocate(p.adjusted, .after = p.value)
 
 plot_variance(anova_res_adjusted = anova_olink_adj, perc_variation = 45)
+
+ggsave(savepath("variance_olink.pdf"), h = 5, w = 10)
 ```
 
 ## Somalogic
 
 ```{r}
 data_anova_soma<-
-  data_soma |>
-  select(DAid, Assay, NPX = RFU) %>%
+  soma_dat |>
+  select(DAid, Assay, NPX) %>%
   left_join(meta |>
               select(DAid, Disease, Age, Sex, BMI), by = "DAid") |>
-  mutate(BMI = ifelse(BMI == 0, NA, BMI))
+  mutate(BMI = ifelse(BMI == 0, NA, BMI)) |> 
+  filter(!Disease %in% c("Healthy - 4 (BAMSE)", "Healthy - 8 (BAMSE)", "Healthy - 16 (BAMSE)", "Healthy - 24 (BAMSE)", "Pregnancy")) |> 
+    mutate(Disease = factor(Disease),
+  BMI = as.numeric(BMI)) 
 
 #saveRDS(data_anova, savepath_data("ANOVA", "anova_dat.rds"))
 
@@ -176,7 +250,24 @@ overlapping_proteins <-
 
 anova_soma_adj
 anova_olink_adj
+
+
+anova_soma_adj |> 
+    rename(Assay = Protein) |> 
+    translate_soma() |> 
+    select(Assay, term, Eta2_perc_olink = Eta2_perc) |> 
+    filter(Assay %in% overlapping_assays) |> 
+    left_join(anova_olink_adj |> 
+    select(Assay = Protein, term, Eta2_perc_soma = Eta2_perc), by = c("Assay", "term")) |> 
+    filter(term != "Residuals") |> 
+    ggplot(aes(Eta2_perc_soma, Eta2_perc_olink, color = term)) +
+    geom_point() +
+    geom_text_repel(aes(label = Assay), show.legend = F) +
+    facet_wrap(~term, scales = "free") +
+    scale_color_manual(values = pal_anova) +
+    theme_hpa()
 ```
+
 ### Plot up/down?
 
 ### 
