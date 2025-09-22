@@ -1,3 +1,5 @@
+library(effectsize)
+
 savepath <-
   function(savename) {
     result_folder <- paste0("results/", Sys.Date())
@@ -314,6 +316,19 @@ generate_split <- function(data,
   ))
 }
 
+do_anova_check <- function(df, protein) {
+  
+    df_protein <-
+    df |>
+    filter(Assay == protein)
+
+  res <- sapply(df_protein[c("Age","Sex","BMI","Disease")], function(x) length(unique(x)))
+  res |> 
+    enframe() |> 
+    mutate(Protein = protein) |> 
+    relocate(Protein)
+}
+
 
 # Function to run ANOVA for a given protein
 do_anova <- function(df, protein) {
@@ -322,7 +337,7 @@ do_anova <- function(df, protein) {
     filter(Assay == protein)
   
   # Linear model with all variables
-  model <- lm(NPX ~ Age + Sex + BMI + Disease , data = df_protein)
+  model <- lm(NPX ~ Age + Sex + BMI + Disease, data = df_protein)
   
   # Conduct ANOVA
   anova_res <- car::Anova(model, type = 3)
@@ -371,19 +386,16 @@ dat |>
     fill = term
   )) +
   geom_col() +
-  theme_hpa(angled = T, axis_x_title = T) +
+  theme_hpa(angled = T, axis_x = F) +
   scale_fill_manual(values = pal_anova) +
   ylab("Variance explained (%)") +
   xlab("Proteins")
   
 }
 
-translate_soma <- function(soma_df) {
-      soma_df |> 
-  left_join(data_soma |> 
-              distinct(Assay, EntrezGeneSymbol), by = "Assay") |> 
-  rename(AptName = Assay,
-  Assay = EntrezGeneSymbol) |>
-  relocate(Assay)
-
-} 
+pal_anova <- c(
+  "Age" = "#75C8AE",
+  "Sex" = "#EB7C6A",
+  "BMI" = "#F7B84D",
+  "Disease" = "#EEE2D1"
+)

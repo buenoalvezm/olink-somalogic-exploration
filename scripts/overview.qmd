@@ -202,6 +202,9 @@ anova_olink_adj <-
   mutate(p.adjusted = p.adjust(p.value, method = "BH")) |>
   relocate(p.adjusted, .after = p.value)
 
+saveRDS(anova_olink_adj, "data/processed/ANOVA_Olink.rds")
+
+
 plot_variance(anova_res_adjusted = anova_olink_adj, perc_variation = 45)
 
 ggsave(savepath("variance_olink.pdf"), h = 5, w = 10)
@@ -235,6 +238,9 @@ anova_soma_adj <-
   filter(term != "(Intercept)") |>
   mutate(p.adjusted = p.adjust(p.value, method = "BH")) |>
   relocate(p.adjusted, .after = p.value)
+
+saveRDS(anova_soma_adj, "data/processed/ANOVA_Soma.rds")
+
 
 plot_variance(anova_res_adjusted = anova_soma_adj, perc_variation = 45)
 ```
