@@ -1,22 +1,48 @@
 ---
-title: "Disease reports"
-format: 
+title: "Human Disease Blood Atlas"
+subtitle: "Disease reports"
+author: "María Bueno Álvez"
+date: last-modified
+date-format: "YYYY-MM-DD"
+format:
   html:
-    theme: cosmo       # professional Bootswatch theme
-    toc: true          # enable table of contents
-    toc-title: "Contents"
-    toc-location: left # table of contents in sidebar
+    self-contained: true
+    theme: flatly
+    title-block-banner: true
+    smooth-scroll: true
+    toc: true
+    toc-depth: 4
+    toc-location: right
     number-sections: true
-    code-fold: true    # allow hiding code blocks
+    number-depth: 4
+    code-fold: true
+    code-tools: true
+    code-copy: true
+    code-overflow: wrap
+    df-print: kable
+    standalone: false
+    fig-align: left
+    figure:
+      caption: "Figure {number}: {label}"
+editor_options: 
+  chunk_output_type: console
 params:
   disease: "Lung cancer"
+project:
+  type: default
+  output-dir: output_reports
+execute:
+  warning: false
 ---
 
 ```{r}
+#| include: false
+
 # Load any required setup
 library(tidyverse)
-source("initialize.R")
-##
+setwd("/Users/mariabueno/Library/CloudStorage/OneDrive-KTH/Repos/olink-somalogic-exploration")
+source("scripts/initialize.R")
+
 # Access the parameter
 disease <- params$disease
 cat("Running analysis for:", disease, "\n")
@@ -24,9 +50,8 @@ cat("Running analysis for:", disease, "\n")
 all_cancers <- c("Pancreatic cancer", "Ovarian cancer", "Breast cancer", "Lung cancer", "Colorectal cancer", "Prostate cancer")
 ```
 
-# Data preparation 
 
-```{r}
+```{r Data preparation}
 other_controls_olink <- 
   manifest_olink |> 
   filter(!Disease %in% all_cancers,
@@ -112,7 +137,7 @@ volcano_cancer_olink <- plot_volcano(de_cancer_olink, multiple = T, nrow = 2, cu
 volcano_disease_olink <- plot_volcano(de_disease_olink, multiple = T, nrow = 2, cutoff = 0) + ggtitle("Pan-disease")
 
 volcano_healthy_olink + volcano_cancer_olink + volcano_disease_olink
-ggsave(paste0("results/de_", disease, "_Olink.png"), h = 5, w = 12)
+#ggsave(paste0("results/de_", disease, "_Olink.png"), h = 5, w = 12)
 ```
 ### Examples
 
@@ -139,7 +164,7 @@ de_combined_olink |>
   pheatmap(color = my_palette) |> 
   as.ggplot()
 
-ggsave(paste0("results/de_pheatmap_", disease, "_Olink.png"), h = 8, w = 5)
+#ggsave(paste0("results/de_pheatmap_", disease, "_Olink.png"), h = 8, w = 5)
 
 
 top_5 <- 
@@ -212,7 +237,7 @@ filter(!is.na(Disease)) |>
         theme_hpa(angled = T) +
         xlab("") 
 
-ggsave(paste0("results/de_examples_", disease, "_Olink.png"), h = 10, w = 10)
+#/de_examples_", disease, "_Olink.png"), h = 10, w = 10)
 
 ```
 

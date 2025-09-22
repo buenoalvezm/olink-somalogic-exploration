@@ -11,7 +11,7 @@ library(patchwork)
 library(pheatmap)
 library(ggupset)
 
-
+setwd("/Users/mariabueno/Library/CloudStorage/OneDrive-KTH/Repos/olink-somalogic-exploration")
 data_soma_all <- read_tsv("../soma_data/soma_data.tsv")
 data_ht_all <- read_tsv( "../olink_data/phase2_unbridged_data.tsv")
 
