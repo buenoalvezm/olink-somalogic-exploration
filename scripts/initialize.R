@@ -35,12 +35,17 @@ Disease = ifelse(Cohort %in% c("FIBR", "PARD"), Diagnose, Disease))  |>
 
 
 
-#pal_disease_category <- c(
-
-#  "Ovarian cancer"  = "#603479",
- # "Other cancers"  = "#DDC49C",
-  #"Healthy" = "#B2B1B1"
-#)
+# pal_type <- 
+#   c("Disease" = "darkred", 
+# "Related diseases" = "", 
+# "Other diseases" = "", 
+# "Healthy" = "grey")
+pal_type <- c(
+  "Disease"          = "#B22222",   # firebrick/darkred (strong, stands out)
+  "Related diseases" = "#E06F1F",   # warm orange
+  "Other diseases"   = "#E5C494",   # soft beige / muted tan
+  "Healthy"          = "grey60"     # neutral grey
+)
 
 pal_de <-
   c(
