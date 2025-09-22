@@ -270,8 +270,6 @@ anova_soma_adj |>
 
 ### Plot up/down?
 
-### 
-
 # ML (separate)
 
 ```{r}
@@ -285,12 +283,13 @@ anova_soma_adj |>
 ```
 # Age prediction Soma/Olink
 
+## Olink
 
 ```{r}
 meta_age <- 
     meta |> 
     filter(!is.na(Age)) |> 
-    select(DAid, Age)
+    select(DAid, Age) 
 
 data_age <- 
     data_olink |> 
@@ -302,11 +301,156 @@ data_age <-
 
 split_age <- generate_split(data = data_age, variable_stratify = "Age")
 
-
 age_prediction <- 
     continuous_prediction(split_train = split_age$data_train,
            split_test = split_age$data_test,
            variable_predict = "Age",
            seed = 213) 
+
+saveRDS(age_prediction, "data/processed/ML_age_Olink.rds")
+# Plot important proteins
+age_prediction$important_proteins |> 
+  head(25) |> 
+  ggplot(aes(x = Variable, y = Importance, color = Sign)) +
+  geom_segment(aes(x = Variable, xend = Variable, y = 0, yend = Importance), linewidth = 0.8) +
+  geom_point(size = 3) +
+  coord_flip() +
+  theme_hpa()
+
+
+# Top 10 profiles
+top10_olink <- 
+  age_prediction$important_proteins |> 
+  head(10) |> 
+  pull(Variable)
+
+data_olink |> 
+  filter(Assay %in% top10_olink) |> 
+  left_join(meta |> 
+  select(DAid, Age, Class), by = "DAid") |> 
+  mutate(Assay = factor(Assay, levels = top10_olink)) |> 
+  ggplot(aes(Age, NPX)) +
+  geom_point(aes(color = Class)) +
+  geom_smooth(color = "white") +
+  facet_wrap(~Assay, scales = "free_y", nrow = 2) +
+  scale_color_manual(values = pal_class) +
+  theme_hpa()
+
+
+# Plot predictions
+R2 <-
+  age_prediction$performance |>
+  filter(.metric == "rsq") |>
+  pull(.estimate) |>
+  round(2)
+
+age_prediction$predictions |>
+  mutate(DAid = split_age$data_test$DAid) |>
+  left_join(meta, by = "DAid") |>
+  mutate(offset = Variable - .pred) |>
+  ggplot(aes(Variable, .pred, color = offset)) +
+  geom_point() +
+  geom_abline(intercept = 0,
+              slope = 1,
+              lty = "dashed") +
+  geom_text(aes(
+    label = paste0("R2 = ", R2),
+    x = 25,
+    y = 75
+  ), inherit.aes = F) +
+  scale_colour_gradient2() +
+  theme_hpa() +
+  ggtitle("Age")
+
+
+```
+
+
+## Soma
+
+```{r}
+
+soma_dat <- 
+    data_soma |> 
+    rename(NPX = RFU) |> 
+    select(DAid, Assay, NPX) |> 
+    filter(!is.na(DAid)) |> 
+    mutate(NPX = ifelse(NPX == -Inf, 0, NPX))
+
+
+data_age_soma <- 
+    soma_dat |> 
+    filter(DAid %in% meta_age$DAid) |> 
+    select(DAid, Assay, NPX) |> 
+    pivot_wider(names_from = Assay, 
+    values_from = NPX) |> 
+    left_join(meta_age, by = "DAid") 
+
+split_age_soma <- generate_split(data = data_age_soma, variable_stratify = "Age")
+
+age_prediction_soma <- 
+    continuous_prediction(split_train = split_age_soma$data_train,
+           split_test = split_age_soma$data_test,
+           variable_predict = "Age",
+           seed = 213) 
+
+saveRDS(age_prediction_soma, "data/processed/ML_age_Soma.rds")
+# Plot important proteins
+age_prediction_soma$important_proteins |> 
+  rename(Assay = Variable) |> 
+  translate_soma() |> 
+  head(25) |> 
+  ggplot(aes(x = fct_reorder(Assay, Importance), y = Importance, color = Sign)) +
+  geom_segment(aes(x = Assay, xend = Assay, y = 0, yend = Importance), linewidth = 0.8) +
+  geom_point(size = 3) +
+  coord_flip() +
+  theme_hpa()
+
+
+
+# Top 10 profiles
+top10_soma <- 
+  age_prediction_soma$important_proteins |> 
+  head(10) |> 
+  pull(Variable)
+
+data_soma |> 
+  filter(Assay %in% top10_soma) |> 
+  left_join(meta |> 
+  select(DAid, Age, Class), by = "DAid") |> 
+  mutate(Assay = factor(Assay, levels = top10_olink)) |> 
+  ggplot(aes(Age, RFU)) +
+  geom_point(aes(color = Class)) +
+  geom_smooth(color = "white") +
+  facet_wrap(~EntrezGeneSymbol, scales = "free_y", nrow = 2) +
+  scale_color_manual(values = pal_class) +
+  theme_hpa()
+
+
+# Plot predictions
+R2 <-
+  age_prediction_soma$performance |>
+  filter(.metric == "rsq") |>
+  pull(.estimate) |>
+  round(2)
+
+age_prediction_soma$predictions |>
+  mutate(DAid = split_age_soma$data_test$DAid) |>
+  left_join(meta, by = "DAid") |>
+  mutate(offset = Variable - .pred) |>
+  ggplot(aes(Variable, .pred, color = offset)) +
+  geom_point() +
+  geom_abline(intercept = 0,
+              slope = 1,
+              lty = "dashed") +
+  geom_text(aes(
+    label = paste0("R2 = ", R2),
+    x = 25,
+    y = 75
+  ), inherit.aes = F) +
+  scale_colour_gradient2() +
+  theme_hpa() +
+  ggtitle("Age")
+
 
 ```
