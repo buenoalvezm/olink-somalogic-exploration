@@ -12,51 +12,59 @@ library(readxl)
 library(tidymodels)
 library(embed)
 
-olink_data <- read_tsv("../olink_data/phase2_unbridged_data.tsv")
-soma_data <- read_tsv("../soma_data/soma_data.tsv")
-manifest <- read_excel("../metadata/samples_2025-05-12.xlsx") 
+olink_data <- read_tsv("../olink_data/phase2_unbridged_data_overlapping_HT_pandisease_20250926.tsv")
+soma_data <- read_tsv("../soma_data/data_phase2_somalogic_curated_20250922.tsv")
+manifest_raw <- read_excel("../metadata/samples_2025-05-12.xlsx") 
+manifest <- read_tsv("../olink_data/metadata_olink_soma_phase2.tsv")
+
+data_olink <- olink_data
+data_soma <- 
+  soma_data |> 
+  pivot_longer(values_to = "RFU",
+  names_to = "Assay", 
+  -DAid)
+  meta <- manifest
 ```
 
-# Samples subset
-
 ```{r}
-soma_id <- 
-    soma_data |> 
-    filter(!is.na(DAid)) |> 
-    distinct(DAid)
+# Samples subset
+# soma_id <- 
+#     soma_data |> 
+#     filter(!is.na(DAid)) |> 
+#     distinct(DAid)
 
-meta <- 
-    manifest |> 
-    filter(DAid %in% soma_id$DAid) |> 
-    select(DAid, Cohort, Class, Diagnose, Disease, Age, Sex, BMI) |> 
-    mutate(Disease = case_when(Cohort == "BAMS" & Diagnose == "4_random" ~ "Healthy - 4 (BAMSE)",
-    Cohort == "BAMS" & Diagnose == "8_random" ~ "Healthy - 8 (BAMSE)",
-    Cohort == "BAMS" & Diagnose == "16_random" ~ "Healthy - 16 (BAMSE)",
-    Cohort == "BAMS" & Diagnose == "24_random" ~ "Healthy - 24 (BAMSE)",
-    Cohort == "PARD" & Diagnose == "PD" ~ "Parkinson's disease",
-    Cohort == "PARD" & Diagnose == "Healthy control" ~ "Healthy (PD)",
-    Cohort == "PREG" ~ "Pregnancy",
-    Cohort == "UCA2" & Diagnose == "OVC" ~ "Ovarian cancer",
-    Cohort == "UCA2" & Diagnose == "PRC" ~ "Prostate cancer",
-    Cohort == "UCA2" & Diagnose == "CRC" ~ "Colorectal cancer",
-    Cohort == "UCA2" & Diagnose == "LUNG" ~ "Lung cancer (UCAN)",
-    Cohort == "UCA2" & Diagnose == "BRC" ~ "Breast cancer (UCAN)",
-    T ~ Disease),
-    Class = case_when(Cohort == "BAMS" ~ "Healthy",
-    Cohort == "UCA2" ~ "Cancer",
-    Cohort == "PREG" ~ "Pregnancy",
-    Cohort == "BAMS" ~ "Childhood development",
-    Cohort == "PARD" & Diagnose == "PD" ~ "Neurologic",
-    Cohort == "PARD" & Diagnose == "Healthy control" ~ "Healthy",
-    T ~ Class))
+# meta <- 
+#     manifest |> 
+#     filter(DAid %in% soma_id$DAid) |> 
+#     select(DAid, Cohort, Class, Diagnose, Disease, Age, Sex, BMI) |> 
+#     mutate(Disease = case_when(Cohort == "BAMS" & Diagnose == "4_random" ~ "Healthy - 4 (BAMSE)",
+#     Cohort == "BAMS" & Diagnose == "8_random" ~ "Healthy - 8 (BAMSE)",
+#     Cohort == "BAMS" & Diagnose == "16_random" ~ "Healthy - 16 (BAMSE)",
+#     Cohort == "BAMS" & Diagnose == "24_random" ~ "Healthy - 24 (BAMSE)",
+#     Cohort == "PARD" & Diagnose == "PD" ~ "Parkinson's disease",
+#     Cohort == "PARD" & Diagnose == "Healthy control" ~ "Healthy (PD)",
+#     Cohort == "PREG" ~ "Pregnancy",
+#     Cohort == "UCA2" & Diagnose == "OVC" ~ "Ovarian cancer",
+#     Cohort == "UCA2" & Diagnose == "PRC" ~ "Prostate cancer",
+#     Cohort == "UCA2" & Diagnose == "CRC" ~ "Colorectal cancer",
+#     Cohort == "UCA2" & Diagnose == "LUNG" ~ "Lung cancer (UCAN)",
+#     Cohort == "UCA2" & Diagnose == "BRC" ~ "Breast cancer (UCAN)",
+#     T ~ Disease),
+#     Class = case_when(Cohort == "BAMS" ~ "Healthy",
+#     Cohort == "UCA2" ~ "Cancer",
+#     Cohort == "PREG" ~ "Pregnancy",
+#     Cohort == "BAMS" ~ "Childhood development",
+#     Cohort == "PARD" & Diagnose == "PD" ~ "Neurologic",
+#     Cohort == "PARD" & Diagnose == "Healthy control" ~ "Healthy",
+#     T ~ Class))
 
-data_olink <- 
-    olink_data |> 
-    filter(DAid %in% soma_id$DAid)
+# data_olink <- 
+#     olink_data |> 
+#     filter(DAid %in% soma_id$DAid)
 
-data_soma <- 
-    soma_data |> 
-    mutate(RFU = log2(RFU))
+# data_soma <- 
+#     soma_data |> 
+#     mutate(RFU = log2(RFU))
 ```
 
 ## Plot
@@ -64,7 +72,7 @@ data_soma <-
 ```{r}
 meta |> 
     filter(is.na(Disease)) |> 
-    count(Cohort, Diagnose)
+    count(Cohort, Disease)
 
 disease_n <- 
     meta |> 
@@ -280,6 +288,8 @@ anova_soma_adj |>
 
 ```{r}
 
+meta
+
 ```
 
 # ML (combined)
@@ -459,4 +469,215 @@ age_prediction_soma$predictions |>
   ggtitle("Age")
 
 
+```
+
+# Detectability
+
+```{r}
+
+
+
+data_olink |> 
+  left_join(meta) |> 
+  mutate(under_LOD = ifelse(NPX < LOD, "Yes", "No")) |> 
+  count(Disease, Assay, under_LOD) |>
+  filter(under_LOD == "Yes") |>
+  ggplot(aes(n)) +
+  geom_histogram() +
+  facet_wrap(~Disease, scales = "free") 
+
+
+
+```
+## BAMSE
+
+```{r}
+
+diseases <- 
+  meta |> 
+  distinct(Class, Disease) |> 
+  mutate(Class = factor(Class, levels = rev(names(pal_class)))) |> 
+  arrange(Class, Disease)
+
+data_olink |>
+  mutate(above_LOD = ifelse(NPX > LOD, "Yes", "No")) |> 
+  left_join(meta |>
+              select(DAid, Disease, Class), by = "DAid") |> 
+  group_by(Class, Disease, DAid) |>
+  summarize(above_LOD_count = sum(NPX > LOD), .groups = "drop") |>
+  ungroup() |> 
+    mutate(Disease = factor(Disease, levels = diseases$Disease)) |>
+
+  ggplot(aes(DAid, above_LOD_count, fill = Class)) +
+  geom_col() +
+  facet_wrap(~Disease, scales = "free_x", nrow = 1) +
+    scale_fill_manual(values = pal_class) +
+  theme_hpa(angled = T, axis_x = F)
+
+
+df_summary <- data_olink |>
+  mutate(above_LOD = ifelse(NPX > LOD, "Yes", "No")) |>
+  left_join(meta |> select(DAid, Disease, Class), by = "DAid") |> 
+  group_by(Class, Disease, DAid) |>
+  summarize(above_LOD_count = sum(NPX > LOD), .groups = "drop") |> 
+  ungroup() |> 
+      mutate(Disease = factor(Disease, levels = diseases$Disease)) 
+
+
+# calculate mean per disease for plotting line
+means <- df_summary |>
+  group_by(Disease) |>
+  summarize(mean_val = mean(above_LOD_count)) |> 
+      mutate(Disease = factor(Disease, levels = diseases$Disease)) 
+
+
+df_summary |>
+  mutate(Disease = factor(Disease, levels = diseases$Disease)) |>
+  ggplot(aes(DAid, above_LOD_count, fill = Class)) +
+  geom_col() +
+  geom_hline(
+    data = means,
+    aes(yintercept = mean_val),
+    linetype = "dashed", color = "black"
+  ) +
+  facet_wrap(~Disease, scales = "free_x", nrow = 1) +
+  scale_fill_manual(values = pal_class) +
+  theme_hpa(angled = TRUE, axis_x = FALSE)
+
+
+```
+```{r}
+bamse_samples <- 
+  manifest_raw |> 
+  filter(Cohort == "BAMS") |> 
+  select(DAid, Age, Sex, BMI, Disease, Class, `Extra data`) |> 
+  mutate(
+    Visit = str_extract(`Extra data`, "(?<=follow_up: )\\d+"),
+    Subject = str_extract(`Extra data`, "(?<=subject_id: )\\d+")
+  ) |> 
+    select(-`Extra data`)
+
+data_olink |>
+  filter(DAid %in% bamse_samples$DAid) |> 
+  mutate(above_LOD = ifelse(NPX > LOD, "Yes", "No")) |>
+  left_join(bamse_samples |>
+              select(DAid, Subject, Visit), by = "DAid") |> 
+  group_by(Subject, Visit) |>
+  summarize(above_LOD_count = sum(NPX > LOD), .groups = "drop") |>
+  ungroup() |> 
+  ggplot(aes(Subject, above_LOD_count, fill = Class)) +
+  geom_col() +
+  facet_wrap(~Visit) +
+  theme_hpa(angled = T)
+
+
+# Count how many times each protein is above LOD per subject across visits
+dat <-
+  data_olink |>
+  filter(DAid %in% bamse_samples$DAid) |> 
+  mutate(above_LOD = ifelse(NPX > LOD, "Yes", "No")) |>
+  left_join(bamse_samples |>
+              select(DAid, Subject, Visit), by = "DAid") |>
+  group_by(Subject, Assay) |>
+  summarize(above_LOD_count = sum(NPX > LOD), .groups = "drop") |>
+  ungroup()
+
+# Calculate number of visits per subject
+number_of_visits <-
+  bamse_samples |>
+  filter(DAid %in% unique(bamse_samples$DAid)) |> 
+  group_by(Subject) |>
+  summarise(Number_of_visits = n_distinct(Visit)) |>
+  arrange(Number_of_visits)
+
+pal_detectability <- c(
+  "None" = "#DF7176",
+  "Some: < 50%" = "#F0BEC1",
+  "Some: > 50%" = "#DFE2E1",
+  "All" = "#3E6964"
+)
+
+# Proportion of visits where each protein is detected
+lod_subject_dat <-
+  dat |>
+  left_join(number_of_visits, by = "Subject") |>
+  mutate(
+    perc = above_LOD_count / Number_of_visits,
+    class = case_when(
+      perc == 0 ~ "None",
+      perc == 1 ~ "All",
+      perc > 0 & perc <= 0.5 ~ "Some: < 50%",
+      perc < 1 &
+        perc > 0.5 ~ "Some: > 50%"
+    )
+  )  |>
+  group_by(Subject) |>
+  count(class) |>
+  mutate(class = factor(class, levels = names(pal_detectability)))
+
+# Average number of proteins detected in all visits
+average_all <-
+  lod_subject_dat |>
+  filter(class == "All") |>
+  pull(n) |>
+  mean()
+
+(average_all / length(unique(data_wellness$Assay))) * 100
+
+# Average number of proteins not detected at any visit
+average_none <-
+  lod_subject_dat |>
+  filter(class == "None") |>
+  pull(n) |>
+  mean()
+
+(average_none / length(unique(data_wellness$Assay))) * 100
+
+# Order subjects by number of proteins always detected
+subject_order <-
+  lod_subject_dat |>
+  filter(class == "All") |>
+  arrange(-n)
+
+wellness_ids <-
+  subject_order |>
+  distinct(Subject) |>
+  pull()
+
+names(pal_wellness_individuals) <- wellness_ids
+
+# Generate LOD barplot
+plot_lod <-
+  lod_subject_dat |>
+  #mutate(Subject = factor(Subject, levels = subject_order$Subject)) |>
+  ggplot(aes(Subject, n, fill = class)) +
+  geom_col() +
+  scale_fill_manual(values = pal_detectability) +
+  theme_hpa(angled = T, axis_x = F) +
+  xlab("Subject")
+
+# Generate color tile bar to map individuals to their colors
+plot_id <-
+  subject_order |>
+  ungroup() |>
+  mutate(Subject = factor(Subject, levels = subject_order$Subject)) |>
+  mutate(rank = rank(-n, ties.method = "first"),
+         y = 1) |>
+  ggplot(aes(Subject, y, fill = Subject)) +
+  geom_tile(color = "white", show.legend = F) +
+  scale_fill_manual(values = pal_wellness_individuals) +
+  theme_hpa(axis_y = F) +
+  coord_fixed() +
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank())
+
+# Combine
+plot_lod / plot_id +
+  plot_layout(heights = c(10, 1))
+
+ggsave(
+  savepath_results("Manuscript-figures", "LOD_per_sample_names_v2.pdf"),
+  h = 4,
+  w = 15
+) 
 ```
