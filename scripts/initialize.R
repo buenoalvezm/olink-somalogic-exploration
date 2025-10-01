@@ -1,21 +1,49 @@
-library(tidyverse)
-library(readxl)
-library(ggbeeswarm)
-library(ggplotify)
-library(limma)
-library(tidymodels)
-library(ggrepel)
-library(vip)
-library(pROC)
-library(patchwork)
-library(pheatmap)
-library(ggupset)
+library("tidyverse")
+library("readxl")
+library("ggbeeswarm")
+library("ggplotify")
+library("limma")
+library("tidymodels")
+library("ggrepel")
+library("vip")
+library("pROC")
+library("patchwork")
+library("pheatmap")
+library("ggupset")
+library("plotly")
+library("ggiraph")
 
 setwd("/Users/mariabueno/Library/CloudStorage/OneDrive-KTH/Repos/olink-somalogic-exploration")
-data_soma_all <- read_tsv("../soma_data/soma_data.tsv")
-data_ht_all <- read_tsv( "../olink_data/phase2_unbridged_data.tsv")
-
+data_soma <- read_tsv("../soma_data/data_phase2_somalogic_curated_20250922.tsv")
+meta_soma <-  read_tsv("../soma_data/meta_phase2_somalogic_20250922.tsv")
+#data_ht_all <- read_tsv( "../olink_data/phase2_unbridged_data.tsv")
+data_ht_all <- read_tsv("../olink_data/phase2_unbridged_data_overlapping_HT_pandisease_20250926.tsv")
 manifest <- read_excel("../metadata/samples_2025-05-12.xlsx")
+
+data_soma_all <- 
+  data_soma |> 
+    pivot_longer(names_to = "Assay", values_to = "RFU", cols = -DAid)
+
+manifest_common <- 
+  manifest |> 
+        filter(!(Disease == "Lung cancer" & Cohort == "ANMU")) |> 
+
+    filter(DAid %in% data_soma_all$DAid) |> 
+    mutate(Disease = case_when(Disease == "Pancreatic ductal adenocarcinoma" ~ "Pancreatic cancer", 
+  Diagnose == "OVC" ~ "Ovarian cancer", 
+Diagnose == "BRC" ~ "Breast cancer",
+Diagnose == "LUNG" ~ "Lung cancer",
+Diagnose == "CRC" ~ "Colorectal cancer",
+Diagnose == "PRC" ~ "Prostate cancer",
+T ~ Disease),
+Disease = ifelse(Cohort == "EPIL", "Epilepsy", Disease),
+Disease = ifelse(Cohort == "PREG", "Pregnancy", Disease),
+Disease = ifelse(Cohort %in% c("FIBR", "PARD"), Diagnose, Disease),
+Disease = ifelse(Disease %in% c("Healthy control", "healthy", "Control"), "Healthy", Disease))  |> 
+  filter(!is.na(Disease),
+Disease != "Longevity")
+
+manifest_common |> distinct(Cohort)
 
 
 manifest_olink <- 
@@ -352,12 +380,40 @@ plot_boxplot <- function(proteins,
 }
 
 
+
+
+
 translate_soma <- function(soma_df) {
       soma_df |> 
-  left_join(data_soma_all |> 
-              distinct(Assay, EntrezGeneSymbol), by = "Assay") |> 
+  left_join(meta_soma |> 
+              distinct(Assay = AptName, EntrezGeneSymbol), by = "Assay") |> 
   rename(AptName = Assay,
   Assay = EntrezGeneSymbol) |>
   relocate(Assay)
 
 } 
+
+# Cohort palette
+# Class palette
+library(RColorBrewer)
+getPalette3 = colorRampPalette(brewer.pal(8, "Set2"))
+pal_class <- getPalette3(8)
+names(pal_class) <-
+  c(
+    "Neurologic",
+    "Cardiovascular",
+    "Cancer",
+    "Autoimmune",
+    "Pregnancy",
+    "Infection",
+    "Metabolic",
+    "Healthy"
+  )
+
+disease_n <- 
+    manifest_common |> 
+    count(Class, Disease) |> 
+    mutate(Class = factor(Class)) |> 
+    arrange(Class) 
+
+disease_levels <- unique(disease_n$Disease)
