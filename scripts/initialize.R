@@ -39,11 +39,15 @@ T ~ Disease),
 Disease = ifelse(Cohort == "EPIL", "Epilepsy", Disease),
 Disease = ifelse(Cohort == "PREG", "Pregnancy", Disease),
 Disease = ifelse(Cohort %in% c("FIBR", "PARD"), Diagnose, Disease),
-Disease = ifelse(Disease %in% c("Healthy control", "healthy", "Control"), "Healthy", Disease))  |> 
+Disease = ifelse(Disease %in% c("Healthy control", "healthy", "Control"), "Healthy", Disease),
+Class = case_when(Disease == "PD" ~ "Neurologic",
+Disease %in% c("Breast cancer", "Lung cancer", "Prostate cancer", "Colorectal cancer", "Ovarian cancer") ~ "Cancer",
+Disease == "Pregnancy" ~ "Healthy",
+Disease == "Healthy" ~ "Healthy",
+T ~ Class))  |> 
   filter(!is.na(Disease),
 Disease != "Longevity")
 
-manifest_common |> distinct(Cohort)
 
 
 manifest_olink <- 

@@ -27,8 +27,8 @@ format:
 editor_options: 
   chunk_output_type: console
 params:
-  disease: "Pregnancy"
-  control_diseases: list("Healthy")
+  disease: "Amyotrophic Lateral Sclerosis"
+  control_diseases: list("PD","Multiple sclerosis","Bipolar disorder","Schizophrenia")
 project:
   type: default
   output-dir: output_reports
@@ -108,17 +108,21 @@ dat_n |>
 
 ```{r}
 # Healthy comparison
+# meta_healthy_olink <- 
+#   manifest_olink |> 
+#   filter(Cohort == "SCAP") |> 
+#   select(DAid, Age, Sex, BMI, Disease) |> 
+#   bind_rows(manifest_common |> 
+#   filter(Disease == disease) |> 
+#   select(DAid, Age, Sex, BMI, Disease))
+
 meta_healthy_olink <- 
-  manifest_olink |> 
-  filter(Cohort == "SCAP") |> 
-  select(DAid, Age, Sex, BMI, Disease) |> 
-  bind_rows(manifest_common |> 
-  filter(Disease == disease) |> 
-  select(DAid, Age, Sex, BMI, Disease))
+  manifest_common |> 
+  filter(Disease %in% c(disease, "Healthy"))
 
 data_healthy_olink <- 
   data_ht_all |> 
-  select(-DAid_batch, -Batch) |> 
+  select(-DAid_batch, -Batch, -LOD, -OlinkID) |> 
   filter(DAid %in% meta_healthy_olink$DAid) |> 
   pivot_wider(names_from = Assay, values_from = NPX)
 
@@ -138,7 +142,7 @@ meta_cancer_olink <-
 
 data_cancer_olink <- 
   data_ht_all |> 
-  select(-DAid_batch, -Batch) |> 
+  select(-DAid_batch, -Batch, -LOD, -OlinkID) |> 
   filter(DAid %in% meta_cancer_olink$DAid) |> 
   pivot_wider(names_from = Assay, values_from = NPX)
 
@@ -158,7 +162,7 @@ meta_disease_olink <-
 
 data_disease_olink <- 
   data_ht_all |> 
-  select(-DAid_batch, -Batch) |> 
+  select(-DAid_batch, -Batch, -LOD, -OlinkID) |> 
   filter(DAid %in% meta_disease_olink$DAid) |> 
   pivot_wider(names_from = Assay, values_from = NPX)
 
@@ -517,6 +521,9 @@ disease_controls <-
   distinct(Disease) |> 
   pull()
 
+
+
+
 # manifest_soma_controls <- 
 #   manifest_soma |> 
 #   mutate(Type = case_when(Disease == disease ~ Disease,
@@ -558,18 +565,28 @@ disease_controls <-
 
 # ggsave(paste0("results/de_examples_", disease, "_Soma.png"), h = 10, w = 10)
 
-p_summary <- 
-  data_soma_all |>
+dat_soma <- 
+   data_soma_all |>
   left_join(meta_soma, by = c("Assay" = "AptName")) |> 
       filter(EntrezGeneSymbol %in% top_5$Assay,
       DAid %in% manifest_common$DAid) |>
-      select(DAid, EntrezGeneSymbol, (RFU)) |>
+      select(DAid, EntrezGeneSymbol, Assay, (RFU)) |>
       left_join(manifest_common_controls |>
                   select(DAid, Disease, Type),
                 by = "DAid") |>
     mutate(Disease = factor(Disease, levels = unique(c(disease, "Healthy", cancer_controls, disease_controls))),
     EntrezGeneSymbol = factor(EntrezGeneSymbol, levels = top_5$Assay)) |> 
 filter(!is.na(Disease)) |> 
+mutate(Assay_Protein = paste(EntrezGeneSymbol, Assay, sep = " - ")) 
+
+assay_order <- 
+  dat_soma |> 
+  distinct(Assay, EntrezGeneSymbol, Assay_Protein) |> 
+  arrange(EntrezGeneSymbol)
+
+p_summary <- 
+  dat_soma |> 
+  mutate(Assay_Protein = factor(Assay_Protein, levels = assay_order$Assay_Protein)) |> 
         ggplot(aes(Type,
                    RFU,
                    fill = Type,
@@ -588,22 +605,13 @@ filter(!is.na(Disease)) |>
  scale_fill_manual(
     values = pal_type,
     na.value = "darkred") +  
-  facet_wrap( ~ EntrezGeneSymbol, scales = "free_y", ncol = 1) +
+  facet_wrap( ~ Assay_Protein, scales = "free_y", ncol = 1) +
         theme_hpa(angled = T) +
         xlab("") 
 
 p_detailed <- 
-  data_soma_all |>
-    left_join(meta_soma, by = c("Assay" = "AptName")) |> 
-      filter(EntrezGeneSymbol %in% top_5$Assay,
-      DAid %in% manifest_common$DAid) |>
-      select(DAid, EntrezGeneSymbol, (RFU)) |>
-      left_join(manifest_common_controls |>
-                  select(DAid, Disease, Type),
-                by = "DAid") |>
-    mutate(Disease = factor(Disease, levels = unique(c(disease, "Healthy", cancer_controls, disease_controls))),
-    EntrezGeneSymbol = factor(EntrezGeneSymbol, levels = top_5$Assay)) |> 
-filter(!is.na(Disease)) |> 
+    dat_soma |> 
+  mutate(Assay_Protein = factor(Assay_Protein, levels = assay_order$Assay_Protein)) |> 
         ggplot(aes(Disease,
                    RFU,
                    fill = Type,
@@ -622,7 +630,7 @@ filter(!is.na(Disease)) |>
  scale_fill_manual(
     values = pal_type,
     na.value = "darkred") +  
-  facet_wrap( ~ EntrezGeneSymbol, scales = "free_y", ncol = 1) +
+  facet_wrap( ~ Assay_Protein, scales = "free_y", ncol = 1) +
         theme_hpa(angled = T) +
         xlab("") 
 
