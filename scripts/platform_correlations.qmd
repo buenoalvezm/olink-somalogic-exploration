@@ -22,11 +22,11 @@ common_olink_assays <- intersect(
 )
 
 olink <- bind_rows(
-  olink_b1 |> select(all_of(common_olink_cols)) |> filter(Assay %in% common_olink_assays), 
-  olink_b4 |> select(all_of(common_olink_cols)) |> filter(Assay %in% common_olink_assays),
-  olink_b5 |> select(all_of(common_olink_cols)) |> filter(Assay %in% common_olink_assays)
+  olink_b1 |> select(all_of(common_olink_cols)) |> filter(Assay %in% common_olink_assays) |> mutate(Batch = 1), 
+  olink_b4 |> select(all_of(common_olink_cols)) |> filter(Assay %in% common_olink_assays) |> mutate(Batch = 4),
+  olink_b5 |> select(all_of(common_olink_cols)) |> filter(Assay %in% common_olink_assays) |> mutate(Batch = 5)
   ) |>
-    select("DAid", "Assay", "NPX", "LOD")
+    select("DAid", "Assay", "Batch", "NPX", "LOD")
 
 rm(olink_b1)
 rm(olink_b4)
@@ -43,5 +43,122 @@ soma <- soma_wide |>
 
 rm(soma_wide)
 rm(soma_meta)
+
+#sample_meta <- readxl::read_excel("data/samples_2025-10-10.xlsx") |>
+#  select(DAid, Disease = Diagnose, Age, Sex, BMI)
 ```
 
+## Global correlation of common proteins
+
+Select common proteins and DAids.
+
+```{r}
+common_daids <- intersect(unique(olink |> pull(DAid)), unique(soma |> pull(DAid)))
+common_assays <- intersect(unique(olink |> pull(Assay)), unique(soma |> pull(Assay)))
+
+olink <- olink |> filter(DAid %in% common_daids, Assay %in% common_assays)
+soma <- soma |> filter(DAid %in% common_daids, Assay %in% common_assays)
+
+#meta <- sample_meta |> filter(DAid %in% common_daids)
+```
+
+Aptamers per assay.
+
+```{r}
+apt_per_assay <- soma |>
+  group_by(Assay) |>
+  summarise(n_apt = n_distinct(AptName))
+
+ggplot(apt_per_assay, aes(x = n_apt)) +
+  stat_bin(binwidth = 1, fill = "lightblue", alpha = 0.7) + 
+  labs(x = "Unique AptName Count", y = "Count") +
+  theme_bw()
+```
+
+Spearman correlations. 
+
+```{r}
+# Calculate the Spearman correlation for each common Assay
+correlation <- olink |>
+  inner_join(soma, by = c("DAid", "Assay")) |>
+  group_by(Assay, AptName) |>
+  summarise(correlation = cor.test(NPX, Value, method = "spearman")$estimate) |>
+  dplyr::ungroup()
+
+median_correlation <- correlation |>
+  pull(correlation) |>
+  median()
+
+# Plot a histogram of the correlation coefficient
+ggplot(correlation, aes(x = correlation)) +
+  stat_bin(binwidth = 0.1, fill = "lightblue", alpha = 0.7) + 
+  geom_vline(aes(xintercept = median_correlation), linetype = "dashed", color = "black") +
+  geom_text(x = median_correlation + 0.2, y = 1000, label = round(median_correlation, 4), color = "black", size = 5) +
+  labs(x = "Correlation Coefficient", y = "Count") +
+  theme_bw()
+
+ggsave("results/platform_corr_global.png", width = 4, height = 3)
+```
+
+```{r}
+# Calculate the Spearman correlation for each common Assay for each Olink batch
+# correlation <- olink |>
+#   inner_join(soma, by = c("DAid", "Assay")) |>
+#   group_by(Assay, AptName, Batch) |>
+#   summarise(correlation = cor.test(NPX, Value, method = "spearman")$estimate) |>
+#   dplyr::ungroup()
+
+# median_correlation <- correlation |>
+#   pull(correlation) |>
+#   median()
+
+# # Plot a histogram of the correlation coefficient
+# ggplot(correlation, aes(x = correlation)) +
+#   stat_bin(binwidth = 0.1, fill = "lightblue", alpha = 0.7) + 
+#   geom_vline(aes(xintercept = median_correlation), linetype = "dashed", color = "black") +
+#   geom_text(x = median_correlation + 0.2, y = 2500, label = round(median_correlation, 4), color = "black", size = 5) +
+#   labs(x = "Correlation Coefficient", y = "Count") +
+#   theme_bw()
+
+# ggsave("results/platform_corr_global_perbatch.png", width = 4, height = 3)
+```
+
+```{r}
+random_faceted_plot <- function(correlation, olink, soma, n, threshold = 0.5) {
+  assays_to_select <- correlation |>
+    filter(correlation < threshold)
+  
+  if (nrow(assays_to_select) <= 1) {
+    stop("Not enough correlations with correlation lower than 0.5 to select.")
+  }
+
+  # Randomly select n Assay values from the filtered data frame
+  selected_assays <- assays_to_select |>
+    dplyr::slice_sample(n = n) |>
+    pull(Assay)
+
+  # Select the corresponding rows from the soma and olink data frames
+  selected_dat <- soma |>
+    filter(Assay %in% selected_assays) |>
+    left_join(olink |> filter(Assay %in% selected_assays), by = c("DAid", "Assay")) |>
+    left_join(correlation |> select(Assay, AptName, correlation), by = c("Assay", "AptName"))
+  
+  label_df <- selected_dat |>
+    group_by(Assay, AptName, correlation) |>
+    summarize(x = max(NPX, na.rm = TRUE),
+              y = max(Value, na.rm = TRUE),
+              .groups = "drop")
+
+  print(selected_dat)
+  # Create the faceted plot
+  ggplot(selected_dat, aes(x = NPX, y = Value)) +
+    geom_point() +
+    geom_text(data = label_df,
+              aes(x = Inf, y = Inf, label = paste0("r = ", round(correlation, 3))),
+              hjust = 1, vjust = 1, size = 3) +
+    facet_wrap(~Assay + AptName) +
+    labs(x = "Olink NPX", y = "Soma Value")
+}
+
+random_faceted_plot(correlation, olink, soma, n = 10, threshold = 0)
+```
