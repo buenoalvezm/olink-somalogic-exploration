@@ -44,8 +44,8 @@ soma <- soma_wide |>
 rm(soma_wide)
 rm(soma_meta)
 
-#sample_meta <- readxl::read_excel("data/samples_2025-10-10.xlsx") |>
-#  select(DAid, Disease = Diagnose, Age, Sex, BMI)
+sample_meta <- readxl::read_excel("data/samples_2025-10-10.xlsx") |>
+  select(DAid, Disease, Age, Sex, BMI)
 ```
 
 ## Global correlation of common proteins
@@ -59,7 +59,7 @@ common_assays <- intersect(unique(olink |> pull(Assay)), unique(soma |> pull(Ass
 olink <- olink |> filter(DAid %in% common_daids, Assay %in% common_assays)
 soma <- soma |> filter(DAid %in% common_daids, Assay %in% common_assays)
 
-#meta <- sample_meta |> filter(DAid %in% common_daids)
+meta <- sample_meta |> filter(DAid %in% common_daids)
 ```
 
 Aptamers per assay.
