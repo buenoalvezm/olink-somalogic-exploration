@@ -1,0 +1,47 @@
+# Platform Correlations
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(readr)
+```
+
+```{r}
+# Olink -----
+olink_b1 <- read_tsv("data/data_phase2_batch1_curated_20241217.tsv")
+olink_b4 <- read_tsv("data/data_phase2_batch4_curated_20250425.tsv")
+olink_b5 <- read_tsv("data/data_phase2_batch5_curated_20250701.tsv")
+common_olink_cols <- intersect(intersect(colnames(olink_b1), colnames(olink_b4)), colnames(olink_b5))
+common_olink_assays <- intersect(
+  intersect(
+    unique(olink_b1 |> pull(Assay)), 
+    unique(olink_b4 |> pull(Assay))
+  ), 
+  unique(olink_b5 |> pull(Assay))
+)
+
+olink <- bind_rows(
+  olink_b1 |> select(all_of(common_olink_cols)) |> filter(Assay %in% common_olink_assays), 
+  olink_b4 |> select(all_of(common_olink_cols)) |> filter(Assay %in% common_olink_assays),
+  olink_b5 |> select(all_of(common_olink_cols)) |> filter(Assay %in% common_olink_assays)
+  ) |>
+    select("DAid", "Assay", "NPX", "LOD")
+
+rm(olink_b1)
+rm(olink_b4)
+rm(olink_b5)
+
+# Soma -----
+soma_wide <- read_tsv("data/data_phase2_somalogic_curated_20250922.tsv")
+soma_meta <- read_tsv("data/meta_phase2_somalogic_20250922.tsv")
+
+soma <- soma_wide |>
+  pivot_longer(cols = -c("DAid"), names_to = "AptName", values_to = "Value") |>
+  left_join(soma_meta |> filter(Organism == "Human") |> select(AptName, EntrezGeneSymbol), by = "AptName") |>
+  rename(Assay = EntrezGeneSymbol)
+
+rm(soma_wide)
+rm(soma_meta)
+```
+
