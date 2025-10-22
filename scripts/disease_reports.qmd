@@ -27,8 +27,8 @@ format:
 editor_options: 
   chunk_output_type: console
 params:
-  disease: "Amyotrophic Lateral Sclerosis"
-  control_diseases: list("PD","Multiple sclerosis","Bipolar disorder","Schizophrenia")
+  disease: "Psoriasis"
+  control_diseases: list("Psoriatic arthritis", "Multiple sclerosis", "Myositis"," Rheumatoid arthritis", "Systemic sclerosis", "Vasculitis")
 project:
   type: default
   output-dir: output_reports
@@ -40,27 +40,34 @@ execute:
 #| include: false
 
 # Load any required setup
-library(tidyverse)
 setwd("/Users/mariabueno/Library/CloudStorage/OneDrive-KTH/Repos/olink-somalogic-exploration")
-source("scripts/initialize.R")
+source("scripts/functions/initialize.R")
+source("scripts/functions/functions_visualization.R")
+source("scripts/functions/functions_utility.R")
+
 
 # Access the parameter
 disease <- params$disease
-#diseases_background <- params$control_diseases
 diseases_background <- unlist(eval(parse(text = params$control_diseases)))
 ```
 
 # Overview of `r params$disease` analyses
 
-Running analysis for: **`r disease`**
+This report summarizes the plasma proteomics analyses for **`r disease`**,  based on both Olink HT and Somascan data.  
 
-Selected control diseases: **`r diseases_background`**
+It includes data overview, differential expression analyses against multiple control groups, and cross-platform comparisons.
+
+**Selected control diseases:** `r diseases_background`  
+**Report generated on:** `r format(Sys.Date(), "%Y-%m-%d")`  
+**Platform(s):** Olink & Somascan  
+ 
+## Samples included in the analyses
 
 ```{r Plot number of samples}
 #| fig-height: 8
 #| fig-width: 8
 
-# Prep meta
+# Identify all "other disease" samples (not the target disease or related controls)
 id_other_controls_olink <- 
   manifest_common |> 
   filter(!Disease %in% c(disease, diseases_background),
@@ -68,11 +75,13 @@ id_other_controls_olink <-
   !is.na(Disease)) |>
   distinct(DAid)
 
+# Identify healthy samples 
 id_healthy_olink <- 
   manifest_common |> 
-  filter(Cohort == "SCAP"| Disease == disease) |> 
+  filter(Disease == "Healthy") |> 
   distinct(DAid)
 
+# Combine relevant samples and assign group type labels
 meta <- 
   manifest_common |> 
   filter(DAid %in% c(id_other_controls_olink$DAid, id_healthy_olink$DAid) | Disease %in% c(disease, diseases_background)) |> 
@@ -84,6 +93,7 @@ meta <-
 )) |> 
   mutate(Type = factor(Type, levels = rev(c("Disease", "Related diseases", "Other diseases", "Healthy"))))
 
+# Summarize and visualize number of samples per group
 dat_n <- 
   meta |> 
   count(Type, Disease) |>
@@ -102,77 +112,61 @@ dat_n |>
   ylab("Number of samples")
 ```
 
-# Differential abundance analyses
+# Differential Abundance Analyses
+
+This section summarizes the differential abundance (DA) analyses performed for `r disease` across both platforms. For each platform, three comparisons were performed:
+
+- **(1) Disease vs Healthy controls** – to identify proteins specifically altered in the disease compared to healthy individuals.  
+- **(2) Disease vs Related diseases** – to highlight disease-specific signals against a set of related conditions.  
+- **(3) Disease vs Other diseases** – to capture disease-specific changes across the broader pan-disease context.  
+
+::: {.callout-note}
+**Note:** The "Healthy" control group used in these analyses is a mixture of samples from five different cohorts: PARD, ALS1, RHE1, TUB1, and VBE2.  
+For Olink HT, additional healthy controls are available. 
+However, these analyses are restricted to samples overlapping between Olink and Soma platforms to ensure consistency across datasets.
+:::
+
+**Volcano Plots** were generated for each comparison, and all differential abundance results were merged into a single data frame to enable downstream analyses and interactive exploration.
+
+To illustrate the patterns of differential abundance, we highlight the **proteins with the largest absolute log fold change across the three comparisons**:
+
+- **Heatmap:** Visualizes the top 20 proteins per comparison are shown across Healthy, Related diseases, and Other diseases.  
+- **Boxplots:** Show individual protein distributions across all control groups and the disease of interest, summarized per disease class (target disease, related diseases, other diseases, healthy) and across individual groups.  
+
+These examples allow **visual inspection of consistent and contrasting protein alterations**, supporting identification of potential biomarker candidates.
+
+The following sections present the results separately for Olink and Somascan platforms.
+
 
 ## Olink 
 
 ```{r}
-# Healthy comparison
-# meta_healthy_olink <- 
-#   manifest_olink |> 
-#   filter(Cohort == "SCAP") |> 
-#   select(DAid, Age, Sex, BMI, Disease) |> 
-#   bind_rows(manifest_common |> 
-#   filter(Disease == disease) |> 
-#   select(DAid, Age, Sex, BMI, Disease))
+de_healthy_olink <- run_de_analysis(
+  disease = disease,
+  controls_label = "Healthy",
+  manifest = manifest_common,
+  data = data_ht_all,
+  platform = "Olink",
+  background = "Healthy"
+)
 
-meta_healthy_olink <- 
-  manifest_common |> 
-  filter(Disease %in% c(disease, "Healthy"))
+de_related_olink <- run_de_analysis(
+  disease = disease,
+  controls_label = "Other diseases",
+  manifest = manifest_common,
+  data = data_ht_all,
+  platform = "Olink",
+  background = diseases_background
+)
 
-data_healthy_olink <- 
-  data_ht_all |> 
-  select(-DAid_batch, -Batch, -LOD, -OlinkID) |> 
-  filter(DAid %in% meta_healthy_olink$DAid) |> 
-  pivot_wider(names_from = Assay, values_from = NPX)
-
-de_healthy_olink <-     
-    do_limma_disease(data_wide = data_healthy_olink,
-                     metadata = meta_healthy_olink,
-                     disease = disease,
-                     controls = "Healthy",
-                     correct = F,
-                     cutoff = 0) 
-
-# Related diseases
-meta_cancer_olink <- 
-  manifest_common |> 
-  filter(Disease %in% c(diseases_background, disease)) |> 
-  select(DAid, Age, Sex, BMI, Disease)
-
-data_cancer_olink <- 
-  data_ht_all |> 
-  select(-DAid_batch, -Batch, -LOD, -OlinkID) |> 
-  filter(DAid %in% meta_cancer_olink$DAid) |> 
-  pivot_wider(names_from = Assay, values_from = NPX)
-
-de_cancer_olink <-     
-    do_limma_disease(data_wide = data_cancer_olink,
-                     metadata = meta_cancer_olink,
-                     disease = disease,
-                     controls = "Other diseases",
-                     correct = F,
-                     cutoff = 0) 
-
-# Pan-disease comparison
-meta_disease_olink <- 
-  manifest_common |> 
-  filter(DAid %in% unique(id_other_controls_olink$DAid) | Disease == disease) |> 
-  select(DAid, Age, Sex, BMI, Disease)
-
-data_disease_olink <- 
-  data_ht_all |> 
-  select(-DAid_batch, -Batch, -LOD, -OlinkID) |> 
-  filter(DAid %in% meta_disease_olink$DAid) |> 
-  pivot_wider(names_from = Assay, values_from = NPX)
-
-de_disease_olink <-     
-    do_limma_disease(data_wide = data_disease_olink,
-                     metadata = meta_disease_olink,
-                     disease = disease,
-                     controls = "Related diseases",
-                     correct = F,
-                     cutoff = 0) 
+de_disease_olink <- run_de_analysis(
+  disease = disease,
+  controls_label = "Related diseases",
+  manifest = manifest_common,
+  data = data_ht_all,
+  platform = "Olink",
+  ids = id_other_controls_olink$DAid
+)
 ```
 
 ### Volcano plots
@@ -181,23 +175,19 @@ de_disease_olink <-
 #| fig-height: 5
 #| fig-width: 10
 
+# Create volcano plots for each comparison
 volcano_healthy_olink <- plot_volcano(de_healthy_olink, multiple = T, nrow = 2, cutoff = 0) + ggtitle("Healthy")
-volcano_cancer_olink <- plot_volcano(de_cancer_olink, multiple = T, nrow = 2, cutoff = 0) + ggtitle("Related diseases")
+volcano_related_olink <- plot_volcano(de_related_olink, multiple = T, nrow = 2, cutoff = 0) + ggtitle("Related diseases")
 volcano_disease_olink <- plot_volcano(de_disease_olink, multiple = T, nrow = 2, cutoff = 0) + ggtitle("Other diseases")
 
-# volcano_healthy_olink_plotly <- ggplotly(volcano_healthy_olink, tooltip = c("Assay"))
-# volcano_cancer_olink_plotly <- ggplotly(volcano_cancer_olink, tooltip = c("Assay"))
-# volcano_disease_olink_plotly <- ggplotly(volcano_disease_olink, tooltip = c("Assay"))
+# Combine plots into one panel for visual comparison
+volcano_healthy_olink + volcano_related_olink + volcano_disease_olink
 
-volcano_healthy_olink + volcano_cancer_olink + volcano_disease_olink
-#volcano_healthy_olink_plotly + volcano_cancer_olink_plotly + volcano_disease_olink_plotly
-
-#ggsave(paste0("results/de_", disease, "_Olink.png"), h = 5, w = 12)
+# Merge all DE results into a single data frame
 de_combined_olink <- 
   de_healthy_olink |> 
-  bind_rows(de_cancer_olink) |> 
+  bind_rows(de_related_olink) |> 
   bind_rows(de_disease_olink)
-
 ```
 
 Interactive plot:
@@ -208,11 +198,11 @@ plot_ly(
   x = ~logFC,
   y = ~-log10(adj.P.Val),
   color = ~sig,
-  colors = pal_de,   # fix typo
+  colors = pal_de,  
   text = ~Assay,
   type = "scatter",
   mode = "markers",
-  frame = ~Control          # optional: animate by Control
+  frame = ~Control          
 )
 ```
 
@@ -220,203 +210,69 @@ plot_ly(
 
 We compare the **log fold change** in Olink HT data across comparisons.
 
+
 ```{r}
 #| fig-height: 3
 #| fig-width: 10
 
-de_combined_olink <- 
-  de_healthy_olink |> 
-  bind_rows(de_cancer_olink) |> 
-  bind_rows(de_disease_olink)
-
-top_assays <- 
-  de_combined_olink |> 
-  group_by(Control) |> 
-  top_n(20, abs(logFC)) |> 
-  ungroup() |> 
-  distinct(Assay)
-
-my_palette <- colorRampPalette(c("white", "#DDC49C", "red"))(100)
-
-de_combined_olink |>
-  filter(Assay %in% top_assays$Assay) |> 
-  select(Assay, logFC, Control) |> 
-  pivot_wider(names_from = Control, values_from = logFC) |> 
-  column_to_rownames("Assay") |> 
-  t() |> 
-  pheatmap(color = my_palette) 
-#ggsave(paste0("results/de_pheatmap_", disease, "_Olink.png"), h = 8, w = 5)
+plot_de_heatmap(de_healthy = de_healthy_olink, de_related = de_related_olink, de_disease = de_disease_olink)
 ```
 
 ```{r}
 #| fig-height: 12
 #| fig-width: 10
 
-top_5 <- 
-  de_combined_olink |>
-  filter(Assay %in% top_assays$Assay) |> 
-  select(Assay, logFC, Control) |> 
-  pivot_wider(names_from = Control, values_from = logFC) |> 
-  mutate(rank_healthy = rank(-Healthy),
-rank_disease = rank(-`Other diseases`),
-rank_cancer = rank(-`Related diseases`)) |> 
-  group_by_all() |> 
-mutate(sum_rank = sum(rank_healthy, rank_cancer, rank_disease)) |> 
-  arrange(sum_rank) |> 
-  head(5)
 
-cancer_controls <- 
-  manifest_common |> 
-  filter(Disease %in% diseases_background,
-  Disease != disease) |> 
-  distinct(Disease) |> 
-  pull()
-
-disease_controls <- 
-  manifest_common |> 
-  filter(DAid %in% id_other_controls_olink$DAid) |> 
-  distinct(Disease) |> 
-  pull()
-
-
-levels <- c(disease, "Healthy", cancer_controls, disease_controls)
-#pal_controls <- c(disease = "darkred", "Healthy" = "grey", "Pan-cancer controls" = "#DDC49C", "Pan-disease controls" = "#99B2A6")
-
-manifest_common_controls <- 
-  manifest_common |> 
-  mutate(Type = case_when(Disease == disease ~ "Disease",
-  Disease == "Healthy" ~ Disease,
-Disease %in% cancer_controls ~ "Related diseases",
-Disease %in% disease_controls ~ "Other diseases",
-T ~"Other"
-)) |> 
-  mutate(Disease = factor(Disease, levels = unique(c(disease, "Healthy", cancer_controls, disease_controls))))
-
+top5_olink <- prepare_de_top(de_healthy_olink, de_related_olink, de_disease_olink)
 
 p_summary <- 
-  data_ht_all |>
-      filter(Assay %in% top_5$Assay,
-      DAid %in% manifest_common$DAid) |>
-      select(DAid, Assay, NPX) |>
-      left_join(manifest_common_controls |>
-                  select(DAid, Disease, Type),
-                by = "DAid") |>
-    mutate(Disease = factor(Disease, levels = unique(c(disease, "Healthy", cancer_controls, disease_controls))),
-    Assay = factor(Assay, levels = top_5$Assay)) |> 
-filter(!is.na(Disease)) |> 
-        ggplot(aes(Type,
-                   NPX,
-                   fill = Type,
-                   color = Type)) +
-        geom_quasirandom(alpha = 0.7, show.legend = F
-) +
-        geom_boxplot(
-          alpha = 0.3,
-          outlier.color = NA,
-          color = "grey20",
-          show.legend = F
-        ) +
- scale_color_manual(
-    values = pal_type,
-    na.value = "darkred")  +
- scale_fill_manual(
-    values = pal_type,
-    na.value = "darkred") +  
-  facet_wrap( ~ Assay, scales = "free_y", ncol = 1) +
-        theme_hpa(angled = T) +
-        xlab("") 
+  plot_de_boxplots(data_ht_all, 
+                 top5_olink, 
+                 platform = "Olink", 
+                 mode = "summary")                
 
 p_detailed <- 
-  data_ht_all |>
-      filter(Assay %in% top_5$Assay,
-      DAid %in% manifest_common$DAid) |>
-      select(DAid, Assay, NPX) |>
-      left_join(manifest_common_controls |>
-                  select(DAid, Disease, Type),
-                by = "DAid") |>
-    mutate(Disease = factor(Disease, levels = unique(c(disease, "Healthy", cancer_controls, disease_controls))),
-    Assay = factor(Assay, levels = top_5$Assay)) |> filter(!is.na(Disease)) |> 
-        ggplot(aes(Disease,
-                   NPX,
-                   fill = Type,
-                   color = Type)) +
-        geom_quasirandom(alpha = 0.7
-) +
-        geom_boxplot(
-          alpha = 0.3,
-          outlier.color = NA,
-          color = "grey20",
-          show.legend = F
-        ) +
- scale_color_manual(
-    values = pal_type,
-    na.value = "darkred")  +
- scale_fill_manual(
-    values = pal_type,
-    na.value = "darkred") +  
-  facet_wrap( ~ Assay, scales = "free_y", ncol = 1) +
-        theme_hpa(angled = T) +
-        xlab("") 
+  plot_de_boxplots(data_ht_all, 
+                 top5_olink, 
+                 platform = "Olink", 
+                 mode = "detailed")                
 
 p_summary + p_detailed +
   plot_layout(widths = c(1,3))
-#/de_examples_", disease, "_Olink.png"), h = 10, w = 10)
 ```
 
-## Somalogic
+## Somascan
 
 ```{r}
-meta_healthy_soma <- 
-  manifest_common |> 
-  filter(Disease %in% c(disease, "Healthy")) |> 
-  select(DAid, Age, Sex, BMI, Disease)
-
-data_healthy_soma <- 
-  data_soma_all |> 
-  filter(DAid %in% meta_healthy_soma$DAid) |> 
-  pivot_wider(names_from = Assay, values_from = RFU)
-
-de_healthy_soma <-     
-    do_limma_disease(data_wide = data_healthy_soma,
-                     metadata = meta_healthy_soma,
-                     disease = disease,
-                     controls = "Healthy",
-                     correct = F,
-                     cutoff = 0) |> 
+de_healthy_soma <- run_de_analysis(
+  disease = disease,
+  controls_label = "Healthy",
+  manifest = manifest_common,
+  data = data_soma_all,
+  platform = "Soma",
+  background = "Healthy"
+)|> 
   translate_soma()
 
 
-data_cancer_soma <- 
-   data_soma_all |> 
-  filter(DAid %in% meta_cancer_olink$DAid) |> 
-  pivot_wider(names_from = Assay, values_from = RFU)
-
-de_cancer_soma<-     
-    do_limma_disease(data_wide = data_cancer_soma,
-                     metadata = meta_cancer_olink,
-                     disease = disease,
-                     controls = "Related diseases",
-                     correct = F,
-                     cutoff = 0) |> 
+de_related_soma <- run_de_analysis(
+  disease = disease,
+  controls_label = "Other diseases",
+  manifest = manifest_common,
+  data = data_soma_all,
+  platform = "Soma",
+  background = diseases_background
+)|> 
   translate_soma()
 
-meta_disease_soma <- 
-  manifest_common |> 
-  filter(DAid %in% unique(id_other_controls_olink$DAid) | Disease == disease) |> 
-  select(DAid, Age, Sex, BMI, Disease)
-
-data_disease_soma <- 
-  data_soma_all |> 
-  filter(DAid %in% meta_disease_soma$DAid) |> 
-  pivot_wider(names_from = Assay, values_from = RFU)
-
-de_disease_soma <-     
-    do_limma_disease(data_wide = data_disease_soma,
-                     metadata = meta_disease_soma,
-                     disease = disease,
-                     controls = "Other diseases",
-                     correct = F,
-                     cutoff = 0) |> 
+de_disease_soma <- run_de_analysis(
+  disease = disease,
+  controls_label = "Related diseases",
+  manifest = manifest_common,
+  data = data_soma_all,
+  platform = "Soma",
+  ids = id_other_controls_olink$DAid
+)|> 
   translate_soma()
 ```
 
@@ -426,16 +282,18 @@ de_disease_soma <-
 #| fig-height: 5
 #| fig-width: 10
 
+# Create volcano plots for each comparison
 volcano_healthy_soma <- plot_volcano(de_healthy_soma, multiple = T, nrow = 2, cutoff = 0) + ggtitle("Healthy")
-volcano_cancer_soma <- plot_volcano(de_cancer_soma, multiple = T, nrow = 2, cutoff = 0) + ggtitle("Pan-cancer")
-volcano_disease_soma <- plot_volcano(de_disease_soma, multiple = T, nrow = 2, cutoff = 0) + ggtitle("Pan-disease")
+volcano_related_soma <- plot_volcano(de_related_soma, multiple = T, nrow = 2, cutoff = 0) + ggtitle("Related diseases")
+volcano_disease_soma <- plot_volcano(de_disease_soma, multiple = T, nrow = 2, cutoff = 0) + ggtitle("Other disease")
 
-volcano_healthy_soma + volcano_cancer_soma + volcano_disease_soma
- #ggsave(paste0("results/de_", disease, "_Soma.png"), h = 5, w = 12)
+# Combine plots into one panel for visual comparison
+volcano_healthy_soma + volcano_related_soma + volcano_disease_soma
 
+# Merge all DE results into a single data frame
 de_combined_soma<- 
   de_healthy_soma |> 
-  bind_rows(de_cancer_soma) |> 
+  bind_rows(de_related_soma) |> 
   bind_rows(de_disease_soma)
 ```
 
@@ -462,191 +320,49 @@ We compare the **log fold change** in Somascan 11K data data across comparisons.
 ```{r}
 #| fig-height: 3
 #| fig-width: 10
-#| 
-de_combined_soma<- 
-  de_healthy_soma |> 
-  bind_rows(de_cancer_soma) |> 
-  bind_rows(de_disease_soma)
 
-top_assays <- 
-  de_combined_soma |> 
-  group_by(Control) |> 
-  top_n(20, abs(logFC)) |> 
-  ungroup() |> 
-  distinct(Assay)
-
-my_palette <- colorRampPalette(c("white", "#DDC49C", "red"))(100)
-
-de_combined_soma |>
-  filter(Assay %in% top_assays$Assay) |> 
-  group_by(Assay, Control) |> 
-  top_n(1, logFC) |> 
-  select(Assay, logFC, Control) |> 
-  pivot_wider(names_from = Control, values_from = logFC) |> 
-  column_to_rownames("Assay") |> 
-  t() |> 
-  pheatmap() 
-
-# ggsave(paste0("results/de_pheatmap_", disease, "_Soma.png"), h = 8, w = 5)
+plot_de_heatmap(de_healthy = de_healthy_soma, de_related = de_related_soma, de_disease = de_disease_soma)
 ```
 ```{r}
 #| fig-height: 12
 #| fig-width: 10
 
-top_5 <- 
-  de_combined_soma |>
-  filter(Assay %in% top_assays$Assay) |>
-   group_by(Assay, Control) |> 
-  top_n(1, logFC) |> 
-  select(Assay, logFC, Control) |> 
-  pivot_wider(names_from = Control, values_from = logFC) |> 
-  mutate(rank_healthy = rank(-Healthy),
-rank_disease = rank(-`Other diseases`),
-rank_cancer = rank(-`Related diseases`)) |> 
-  group_by_all() |> 
-mutate(sum_rank = sum(rank_healthy, rank_cancer, rank_disease)) |> 
-  arrange(sum_rank) |> 
-  head(5)
-
-cancer_controls <- 
-  manifest_common |> 
-  filter(Disease %in% diseases_background,
-  Disease != disease) |> 
-  distinct(Disease) |> 
-  pull()
-
-disease_controls <- 
-  manifest_common |> 
-  filter(DAid %in% id_other_controls_olink$DAid) |> 
-  distinct(Disease) |> 
-  pull()
-
-
-
-
-# manifest_soma_controls <- 
-#   manifest_soma |> 
-#   mutate(Type = case_when(Disease == disease ~ Disease,
-#   Disease == "Healthy" ~ Disease,
-# Disease %in% cancer_controls ~ "Pan-cancer controls",
-# Disease %in% disease_controls ~ "Pan-disease controls")) |> 
-#   mutate(Disease = factor(Disease, levels = c(disease, "Healthy", cancer_controls, disease_controls)))
-
-# data_soma_all |>
-#       filter(EntrezGeneSymbol %in% top_5$Assay,
-#       DAid %in% manifest_soma$DAid) |>
-#       select(DAid, EntrezGeneSymbol, (RFU)) |>
-#       left_join(manifest_soma_controls |>
-#                   select(DAid, Disease, Type),
-#                 by = "DAid") |>
-#     mutate(Disease = factor(Disease, levels = c(disease, "Healthy", cancer_controls, disease_controls))) |> 
-# filter(!is.na(Disease)) |> 
-#         ggplot(aes(Disease,
-#                    log2(RFU),
-#                    fill = Type,
-#                    color = Type)) +
-#         geom_quasirandom(alpha = 0.7
-# ) +
-#         geom_boxplot(
-#           alpha = 0.3,
-#           outlier.color = NA,
-#           color = "grey20",
-#           show.legend = F
-#         ) +
-#  scale_color_manual(
-#     values = pal_controls,
-#     na.value = "darkred")  +
-#  scale_fill_manual(
-#     values = pal_controls,
-#     na.value = "darkred") +  
-#   facet_wrap(~EntrezGeneSymbol, scales = "free_y", ncol = 1) +
-#         theme_hpa(angled = T) +
-#         xlab("") 
-
-# ggsave(paste0("results/de_examples_", disease, "_Soma.png"), h = 10, w = 10)
-
-dat_soma <- 
-   data_soma_all |>
-  left_join(meta_soma, by = c("Assay" = "AptName")) |> 
-      filter(EntrezGeneSymbol %in% top_5$Assay,
-      DAid %in% manifest_common$DAid) |>
-      select(DAid, EntrezGeneSymbol, Assay, (RFU)) |>
-      left_join(manifest_common_controls |>
-                  select(DAid, Disease, Type),
-                by = "DAid") |>
-    mutate(Disease = factor(Disease, levels = unique(c(disease, "Healthy", cancer_controls, disease_controls))),
-    EntrezGeneSymbol = factor(EntrezGeneSymbol, levels = top_5$Assay)) |> 
-filter(!is.na(Disease)) |> 
-mutate(Assay_Protein = paste(EntrezGeneSymbol, Assay, sep = " - ")) 
-
-assay_order <- 
-  dat_soma |> 
-  distinct(Assay, EntrezGeneSymbol, Assay_Protein) |> 
-  arrange(EntrezGeneSymbol)
+top5_soma <- prepare_de_top(de_healthy_soma, de_related_soma, de_disease_soma)
 
 p_summary <- 
-  dat_soma |> 
-  mutate(Assay_Protein = factor(Assay_Protein, levels = assay_order$Assay_Protein)) |> 
-        ggplot(aes(Type,
-                   RFU,
-                   fill = Type,
-                   color = Type)) +
-        geom_quasirandom(alpha = 0.7, show.legend = F
-) +
-        geom_boxplot(
-          alpha = 0.3,
-          outlier.color = NA,
-          color = "grey20",
-          show.legend = F
-        ) +
- scale_color_manual(
-    values = pal_type,
-    na.value = "darkred")  +
- scale_fill_manual(
-    values = pal_type,
-    na.value = "darkred") +  
-  facet_wrap( ~ Assay_Protein, scales = "free_y", ncol = 1) +
-        theme_hpa(angled = T) +
-        xlab("") 
+  plot_de_boxplots(data_soma_all, 
+                 top5_soma, 
+                 platform = "Soma", 
+                 meta_soma = meta_soma, 
+                 mode = "summary")                
 
 p_detailed <- 
-    dat_soma |> 
-  mutate(Assay_Protein = factor(Assay_Protein, levels = assay_order$Assay_Protein)) |> 
-        ggplot(aes(Disease,
-                   RFU,
-                   fill = Type,
-                   color = Type)) +
-        geom_quasirandom(alpha = 0.7, show.legend = F
-) +
-        geom_boxplot(
-          alpha = 0.3,
-          outlier.color = NA,
-          color = "grey20",
-          show.legend = F
-        ) +
- scale_color_manual(
-    values = pal_type,
-    na.value = "darkred")  +
- scale_fill_manual(
-    values = pal_type,
-    na.value = "darkred") +  
-  facet_wrap( ~ Assay_Protein, scales = "free_y", ncol = 1) +
-        theme_hpa(angled = T) +
-        xlab("") 
+  plot_de_boxplots(data_soma_all, 
+                 top5_soma, 
+                 platform = "Soma", 
+                 meta_soma = meta_soma, 
+                 mode = "detailed")                
 
 p_summary + p_detailed +
   plot_layout(widths = c(1,3))
-#/de_examples_", disease, "_Olink.png"), h = 10, w = 10)
 ```
-# Overlap
+# Differential abundance overlap
+
+To further explore the relationship between Olink HT and Somascan results, we quantified the overlap of **significantly differentially abundant proteins** across platforms and comparisons.   The resulting sets were visualized using an intersection (UpSet) plot, which summarizes the **number of shared and platform-specific significant proteins** across all comparisons.
+
+Proteins appearing in multiple intersections may represent **robust, disease-relevant biomarkers** detectable by both technologies. Platform-specific signals that may reflect **assay design, detection chemistry**, or **platform sensitivity** differences.
 
 ```{r}
 #| fig-height: 8
 #| fig-width: 14
-#| 
-combined_list <- 
-  map_df(list(de_cancer_soma,de_cancer_olink,de_healthy_soma,de_healthy_olink,de_disease_soma,de_disease_olink), function(df) {
 
+# Combine significant differential abundance results across platforms and comparisons
+combined_list <- 
+  
+  map_df(
+    list(de_related_soma,de_related_olink,de_healthy_soma,de_healthy_olink,de_disease_soma,de_disease_olink), function(df) {
+
+      # Identify platform based on column name (SomaLogic has 'AptName')
  if("AptName" %in% colnames(df)) {
       df <- 
         df |> 
@@ -657,7 +373,7 @@ combined_list <-
         mutate(Platform = "Olink")
     }
 
-
+      # Keep only significant proteins and relevant metadat
   df <- 
     df |> 
     filter(sig != "not significant") |> 
@@ -669,7 +385,7 @@ combined_list <-
 combined_list |> 
   count(Control, Platform)
 
-
+# Visualize overlap in significant proteins between platforms and comparisons
 combined_list |>
   mutate(List = paste(Control, Platform, sep = " - ")) |> 
   group_by(Assay) |>
@@ -679,16 +395,23 @@ combined_list |>
   geom_text(stat = "count", aes(label = ..count..), vjust = -1) +
   scale_x_upset(n_intersections = 20) +
   theme_hpa()
-
 ```
-# Comparison
+
+# Cross-platform concordance
+
+Finally, we assess the consistency of differntial abundance (DA) results across the two proteomic platforms, Olink HT and Somascan, for **overlapping proteins**.  
+
+- **Scatter plots** show the relationship between statistical significance (−log₁₀ adjusted p-value) in Olink HT and Somascan. Points are colored by platform significance category (significant in both, Olink only, Soma only, or neither).
+- **Bar plots** summarize the number of significantly altered proteins per comparison across the significance categories, highlighting the degree of agreement between the two platforms.
+
+An interactive version of the scatter plot allows further exploration of individual proteins, with hover-over details showing gene symbol and comparison type.
 
 
 ```{r}
 #| fig-height: 10
 #| fig-width: 20
 
-# Overlapping proteins
+# Identify overlapping proteins
 ht_assays <- 
   data_ht_all |> 
   distinct(Assay) |> 
@@ -701,8 +424,8 @@ soma_assays <-
   pull()
 
 overlapping_assays <- intersect(ht_assays, soma_assays)
-#length(overlapping_assays)
 
+# Combine Olink and Somalogic differential expression results
 all_combined <- 
   de_combined_olink |> 
   filter(Assay %in% overlapping_assays) |> 
@@ -715,11 +438,9 @@ all_combined <-
 
 all_combined_dat <- 
   all_combined |> 
-  filter(!AptName %in% c("seq.19590.46")) |> 
+  #filter(!AptName %in% c("seq.19590.46")) |> 
   select(Assay, adj.P.Val, Control, Platform) |> 
   mutate(adj.P.Val = -log10(adj.P.Val)) |> 
-  #group_by(Assay, Control, Platform) |> 
-  #top_n(1, adj.P.Val) |> ungroup() |> 
   pivot_wider(names_from = Platform, values_from = adj.P.Val) |> 
   mutate(Significance = case_when(`Olink HT` > -log10(0.05) & `Somascan` > -log10(0.05) ~ "Significant in both",
 `Olink HT` > -log10(0.05) & `Somascan` < -log10(0.05) ~ "Significant in Olink",
@@ -730,14 +451,7 @@ T ~"Other"
    mutate(
 Control = factor(Control, levels = c("Healthy", "Related diseases", "Other diseases"))) 
 
-
-
-pal_platform <- c ("Significant in both" = "#322F81",
-"Significant in Olink" = "#4CC5F3",
-                  "Significant in Somalogic" = "#EC038A",
-                 "Not significant in both" = "grey") #322F81
-
-
+# Generate scatterplot: compare significance in Olink and Somalogic datasets
 plot_scatter <- 
   all_combined_dat|> 
   ggplot(aes(`Olink HT`, Somascan, color = Significance, text = Assay)) +
@@ -747,9 +461,7 @@ plot_scatter <-
   theme_hpa() +   
   facet_wrap(~Control, scales = "free") 
 
-#plotly_scatter <- ggplotly(plot_scatter, tooltip = c("Assay"))
-#plotly_scatter <- ggiraph::girafe(plot_scatter)
-
+# Generate barplos: number of differentially expressed proteins per comparison
 plot_barplot <- 
   all_combined_dat |> 
   group_by(Control) |>
@@ -767,11 +479,9 @@ plot_barplot <-
   xlab("") +
   theme_hpa()
 
-
-
+# Combine plots
 plot_scatter + plot_barplot +
  plot_layout(heights = c(2,1))
-
 ```
 
 Interactive plot:
@@ -788,108 +498,4 @@ plot_ly(
   mode = "markers",
   frame = ~Control          # optional: animate by Control
 )
-```
-
-
-```{r}
-
-# data_soma_all |> 
-#  filter(grepl("D-dimer", Target)) |> 
-#  distinct(Assay, Target, EntrezGeneSymbol)
-# data_soma_all |> filter(EntrezGeneSymbol == "CFHR5") |> 
-#   left_join(manifest, by = "DAid") |> 
-#   filter(!is.na(Disease)) |> 
-#  # filter(Disease %in% c("Acute venous thromboembolism", "Healthy", "Acute COVID")) |> 
-#  # filter(Disease %in% c("Healthy", "Myositis", "Rheumatoid arthritis", "Systemic sclerosis", "Vasculitis")) |> 
-#   ggplot(aes(Disease, log2(RFU))) +
-#   geom_quasirandom(aes(color = Sex)) +
-#   geom_boxplot(fill = NA, outlier.color = NA) +
-#   facet_wrap(~Assay, ncol = 1) +
-#   theme_hpa(angled = T)
-
-# proteins <- c("GP1BA", "S100A12", "IL6", "SELP", "CFHR5", "TFPI2")
-# proteins <- c("NOS3", "TIA1", "LTA4H", "APOL1", "NDUFS6", "KLK4", "CCL21", "SERPINA9","RERG", "CXCL13", "CCL7")
-
-# data_soma_all |> 
-#   left_join(meta_soma, by = c("Assay" = "AptName")) |> 
-# # filter(grepl("D-dimer", Target)) |> 
-#  #distinct(Assay, Target, EntrezGeneSymbol)
-#   filter(EntrezGeneSymbol %in% proteins) |> 
-#   left_join(manifest, by = "DAid") |> 
-#   mutate(Assay = paste0(EntrezGeneSymbol, " - ", Assay),
-# Disease = factor(Disease, levels = disease_levels)) |> 
-# filter(!is.na(Disease)) |> 
-#  # filter(Disease %in% c("Acute venous thromboembolism", "Healthy", "Acute COVID")) |> 
-#  # filter(Disease %in% c("Healthy", "Myositis", "Rheumatoid arthritis", "Systemic sclerosis", "Vasculitis")) |> 
-#   ggplot(aes(Disease, RFU)) +
-#   geom_quasirandom(aes(color = Class)) +
-#   geom_boxplot(fill = NA, outlier.color = NA) +
-#   scale_color_manual(values = pal_class) +
-#   facet_wrap(~Assay, ncol = 1, scales = "free_y") +
-#   theme_hpa(angled = T)
-
-# ggsave(savepath("Emil_soma_proteins.pdf"), h = 18, w = 8)
-# ggsave(savepath("Josefin_soma_proteins.pdf"), h = 22, w = 8)
-
-```
-
-
-
-```{r}
-# plot_data <- 
-#   data_soma_all |>
-#   left_join(meta_soma, by = c("Assay" = "AptName")) |>
-#   left_join(manifest_common, by = "DAid") |> 
-#   filter(DAid %in% manifest_common$DAid) |>
-#   select(DAid, EntrezGeneSymbol, Disease, Class, RFU) |>
-#   mutate(Disease = factor(Disease, levels = c(disease, "Healthy", cancer_controls, disease_controls)),
-#          EntrezGeneSymbol = factor(EntrezGeneSymbol, levels = top_5$Assay)) |>
-#   filter(!is.na(Disease))
-
-# plot_ly(
-#   plot_data,
-#   x = ~Disease,
-#   y = ~RFU,
-#   color = ~Class,
-#   colors = pal_class,
-#   type = "box",
-#   boxpoints = "all",
-#   jitter = 0.5,
-#   pointpos = 0,
-#   marker = list(opacity = 0.7),
-#   line = list(color = "grey20"),
-#   transforms = list(
-#     list(
-#       type = 'filter',
-#       target = ~EntrezGeneSymbol,
-#       operation = '=',
-#       value = levels(plot_data$EntrezGeneSymbol)[1]   # default protein shown
-#     )
-#   )
-# ) %>%
-#   layout(
-#     updatemenus = list(
-#       list(
-#         type = "dropdown",
-#         direction = "down",
-#         showactive = TRUE,
-#         active = 0,
-#         buttons = lapply(levels(plot_data$EntrezGeneSymbol), function(prot) {
-#           list(
-#             method = "restyle",
-#             args = list("transforms[0].value", list(prot)),
-#             label = prot
-#           )
-#         }),
-#         # 🔑 make dropdown searchable
-#         x = 0.1, y = 1.15,
-#         pad = list(r = 10, t = 10),
-#         name = "Protein",
-#         showarrow = FALSE
-#       )
-#     ),
-#     yaxis = list(title = "RFU"),
-#     xaxis = list(title = "", tickangle = -45)
-#   )
-
 ```
