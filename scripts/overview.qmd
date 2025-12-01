@@ -9,62 +9,112 @@ format: html
 ```{r}
 library(tidyverse)
 library(readxl)
+library(HDAnalyzeR)
+library(mbaRtools)
 library(tidymodels)
 library(embed)
+#source("scripts/functions/functions_visualization.R")
 
-olink_data <- read_tsv("../olink_data/phase2_unbridged_data_overlapping_HT_pandisease_20250926.tsv")
-soma_data <- read_tsv("../soma_data/data_phase2_somalogic_curated_20250922.tsv")
-manifest_raw <- read_excel("../metadata/samples_2025-05-12.xlsx") 
-manifest <- read_tsv("../olink_data/metadata_olink_soma_phase2.tsv")
+# Data
+data_soma_wide <- read_tsv("../../Data/Somascan/processed/data_phase2_somalogic_curated_subset_20251031.tsv")
+data_olink <- read_tsv("../../Data/Olink/processed/data_phase2_HT_bridged_curated_subset_20251031.tsv")
+meta_soma <- read_tsv("../../Data/Somascan/processed/meta_phase2_somalogic_elod_20251028.tsv")
+meta <- read_tsv("../../Data/metadata/meta_phase2_hpav25_20251031.tsv")
 
-data_olink <- olink_data
+# Soma data in long format
 data_soma <- 
-  soma_data |> 
-  pivot_longer(values_to = "RFU",
-  names_to = "Assay", 
-  -DAid)
-  meta <- manifest
+  data_soma_wide |> 
+  pivot_longer(names_to = "AptName", values_to = "log2RFU", cols = -DAid) |> 
+  left_join(meta_soma |> 
+    select(AptName, Assay = EntrezGeneSymbol), by = "AptName")
 ```
 
+# Initialize
+
 ```{r}
-# Samples subset
-# soma_id <- 
-#     soma_data |> 
-#     filter(!is.na(DAid)) |> 
-#     distinct(DAid)
+hd_olink <- hd_initialize(data_olink, meta)
+hd_soma <- hd_initialize(data_soma, meta, var_name = "AptName", value_name = "log2RFU")
+```
 
-# meta <- 
-#     manifest |> 
-#     filter(DAid %in% soma_id$DAid) |> 
-#     select(DAid, Cohort, Class, Diagnose, Disease, Age, Sex, BMI) |> 
-#     mutate(Disease = case_when(Cohort == "BAMS" & Diagnose == "4_random" ~ "Healthy - 4 (BAMSE)",
-#     Cohort == "BAMS" & Diagnose == "8_random" ~ "Healthy - 8 (BAMSE)",
-#     Cohort == "BAMS" & Diagnose == "16_random" ~ "Healthy - 16 (BAMSE)",
-#     Cohort == "BAMS" & Diagnose == "24_random" ~ "Healthy - 24 (BAMSE)",
-#     Cohort == "PARD" & Diagnose == "PD" ~ "Parkinson's disease",
-#     Cohort == "PARD" & Diagnose == "Healthy control" ~ "Healthy (PD)",
-#     Cohort == "PREG" ~ "Pregnancy",
-#     Cohort == "UCA2" & Diagnose == "OVC" ~ "Ovarian cancer",
-#     Cohort == "UCA2" & Diagnose == "PRC" ~ "Prostate cancer",
-#     Cohort == "UCA2" & Diagnose == "CRC" ~ "Colorectal cancer",
-#     Cohort == "UCA2" & Diagnose == "LUNG" ~ "Lung cancer (UCAN)",
-#     Cohort == "UCA2" & Diagnose == "BRC" ~ "Breast cancer (UCAN)",
-#     T ~ Disease),
-#     Class = case_when(Cohort == "BAMS" ~ "Healthy",
-#     Cohort == "UCA2" ~ "Cancer",
-#     Cohort == "PREG" ~ "Pregnancy",
-#     Cohort == "BAMS" ~ "Childhood development",
-#     Cohort == "PARD" & Diagnose == "PD" ~ "Neurologic",
-#     Cohort == "PARD" & Diagnose == "Healthy control" ~ "Healthy",
-#     T ~ Class))
+# Correlations
 
-# data_olink <- 
-#     olink_data |> 
-#     filter(DAid %in% soma_id$DAid)
+```{r}
+do_correlation <- function(protein) {
 
-# data_soma <- 
-#     soma_data |> 
-#     mutate(RFU = log2(RFU))
+   dat_soma_protein <- 
+  data_soma |> 
+  select(DAid, AptName, Assay, log2RFU) |> 
+  filter(Assay == protein)
+
+ dat <- 
+   dat_soma_protein |>
+  left_join(data_olink |> 
+    select(DAid, Assay, NPX) |> 
+    filter(Assay == protein)) 
+
+  pearson <- cor(dat$NPX, dat$log2RFU, method = "pearson", use = "complete.obs")
+  spearman <- cor(dat$NPX, dat$log2RFU, method = "spearman", use = "complete.obs")
+
+  tibble(Protein = protein, Spearman_cor = spearman, Pearson_cor = pearson)
+
+  
+}
+
+
+cor_df <- map_df(overlapping_assays, function(protein) { do_correlation(protein = protein)})
+
+
+
+cor_df |> 
+  write_tsv("data/processed/correlations.tsv")
+
+
+cor_df |> 
+  ggplot(aes(Pearson_cor)) +
+  geom_histogram()
+
+cor_df |> arrange(Spearman_cor)
+
+protein <- "MS4A1"
+protein <- "NHLRC3"
+protein <- "MS4A1"
+
+   dat_soma_protein <- 
+  data_soma |> 
+  select(DAid, AptName, Assay, log2RFU) |> 
+  filter(Assay == protein)
+
+ dat <- 
+   dat_soma_protein |>
+  left_join(data_olink |> 
+    select(DAid, Assay, NPX) |> 
+    filter(Assay == protein)) 
+
+dat |> 
+  left_join(meta) |> 
+  ggplot(aes(NPX, log2RFU)) +
+  geom_point() +
+  geom_smooth() +
+  facet_wrap(~Class, scales = "free") +
+  theme_hpa()
+
+ ```
+
+# QC summary
+
+```{r}
+hd_qc_summary(hd_olink)
+hd_qc_summary(hd_soma)
+
+pca_res <- hd_pca(hd_obj, components = 15) |> 
+  hd_plot_dim(hd_obj, "PC1", "PC2", color = "Disease", palette = "cancers12", axis_variance = TRUE) |> 
+  hd_plot_pca_loadings(displayed_pcs = 6, displayed_features = 10) |> 
+  hd_plot_pca_variance()
+
+umap_res <- hd_umap(hd_obj, components = 2) |> 
+  hd_plot_dim(hd_obj, "UMAP1", "UMAP2", color = "Age", palette = NULL)
+
+umap_res$umap_plot + scale_color_viridis()
 ```
 
 ## Plot
@@ -86,23 +136,50 @@ disease_n |>
     geom_col() +
     geom_text(aes(label = n, color = Class, y = n +10)) +
     coord_flip() +
-    scale_color_manual(values = pal_class)+
-    scale_fill_manual(values = pal_class) +
+  #  scale_color_hpa("class")+
+ #   scale_fill_manual(values = pal_class) +
     theme_hpa()
 
 ggsave(savepath("disease_n.png"), h = 8, w =7)
+
+
+meta |> 
+  filter(Cohort != "BAMS") |> 
+  ggplot(aes(Age, fill = Class)) +
+  geom_histogram() +
+# geom_density() +
+  facet_wrap(~Class,scales = "free", nrow = 1) +
+  #scale_fill_manual(values = pal_class) +
+  theme_hpa()
+
+# Prepare data
+meta2 <- meta %>%
+  filter(Cohort != "BAMS") %>%
+  mutate(AgeBin = cut(Age, breaks = seq(floor(min(Age)), ceiling(max(Age))+5, by = 5), right = FALSE)) %>%
+  group_by(Class, AgeBin, Sex) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  mutate(CountSigned = if_else(Sex == "Male", -Count, Count))  # males negative
+
+ggplot(meta2, aes(x = CountSigned, y = AgeBin, fill = Sex)) +
+  geom_col(width = 0.8) +
+  facet_wrap(~Class, scales = "free_x") +
+  scale_x_continuous(labels = abs) +  # show absolute counts
+  scale_fill_manual(values = c("Male" = "skyblue", "Female" = "pink")) +
+  coord_flip() +
+  labs(x = "Count", y = "Age", fill = "Sex") +
+  theme_minimal()
 ```
 
 # Overlapping proteins
 
 ```{r}
 ht_assays <- 
-  data_ht_all |> 
+  data_olink |> 
   distinct(Assay) |> 
   pull()
 
 soma_assays <- 
-  data_soma_all |> 
+  meta_soma |> 
   distinct(EntrezGeneSymbol) |> 
   pull()
 
@@ -113,10 +190,10 @@ length(overlapping_assays)
 # Aptamers per protein
 
 ```{r}
-data_soma_all |> 
-    distinct(EntrezGeneSymbol, Assay) |> 
-    filter(EntrezGeneSymbol %in% overlapping_assays) |> 
-    count(EntrezGeneSymbol, name = "n_aptamers") |> 
+data_soma |> 
+    distinct(Assay, AptName) |> 
+    filter(Assay %in% overlapping_assays) |> 
+    count(Assay, name = "n_aptamers") |> 
     arrange(-n_aptamers) |> 
     filter(n_aptamers > 1) |> 
     count(n_aptamers, name = "n_proteins") |> 
@@ -126,21 +203,15 @@ data_soma_all |>
     geom_text(aes(label = n_proteins, y = n_proteins + 10)) +
     labs(x = "Number of aptamers", y = "Number of proteins") +
     theme_hpa()
+
 ggsave(savepath("n_aptamers_protein.png"), h = 5, w =5)
 
-plot_boxplot(platform = "Somalogic", type = "aptamer", protein = "C3")
-plot_boxplot(platform = "Somalogic", type = "aptamer", protein = "VEGFA")
+#plot_boxplot(platform = "Somalogic", type = "aptamer", protein = "C3")
+#plot_boxplot(platform = "Somalogic", type = "aptamer", protein = "VEGFA")
 ```
 # UMAP
 
 ```{r}
-soma_dat <- 
-    data_soma |> 
-    rename(NPX = RFU) |> 
-    select(DAid, Assay, NPX) |> 
-    filter(!is.na(DAid)) |> 
-    mutate(NPX = ifelse(NPX == -Inf, 0, NPX))
-
 umap_olink <- do_umap(data = data_olink, wide = F)
 umap_soma <- do_umap(data = soma_dat, wide = F)
 
@@ -680,4 +751,180 @@ ggsave(
   h = 4,
   w = 15
 ) 
+```
+
+# Differential expression
+
+```{r}
+
+diseases <- 
+  meta |> 
+  distinct(Disease, Class, Cohort) |> 
+  filter(Cohort != "BAMS",
+  Disease != "Healthy (Adult)") |> 
+  arrange(Class, Disease) |> 
+  pull(Disease)
+
+de_healthy <- 
+  map_df(diseases, function(disease) {
+de_olink <- hd_de_limma(hd_olink, 
+                          variable = "Disease", 
+                          case = disease,
+                          control = "Healthy (Adult)", 
+                          correct = c("Age", "Sex"))
+
+de_soma <- hd_de_limma(hd_soma, 
+                          variable = "Disease", 
+                          case = disease, 
+                          control = "Healthy (Adult)", 
+                          correct = c("Age", "Sex"))                          
+
+de_olink$de_res |> 
+  select(Disease, Assay = Feature, logFC_Olink = logFC, pval_Olink = adj.P.Val) |> 
+  left_join(de_soma$de_res |> 
+  rename(AptName = Feature) |> 
+  left_join(meta_soma |> select(AptName, Assay = EntrezGeneSymbol)) |> 
+  select(Disease, Assay, logFC_Soma = logFC, pval_Soma = adj.P.Val))
+
+})
+
+
+de_olink_age <- hd_de_limma(hd_olink, 
+                          variable = "Age", 
+                          case = NULL, 
+                          correct = c("Sex"))
+
+de_soma_age <- hd_de_limma(hd_soma, 
+                        variable = "Age", 
+                          case = NULL)                          
+
+de_olink_age$de_res |> 
+  select(Assay = Feature, logFC_Olink = logFC, pval_Olink = adj.P.Val) |> 
+  left_join(de_soma_age$de_res |> 
+  rename(AptName = Feature) |> 
+  left_join(meta_soma |> select(AptName, Assay = EntrezGeneSymbol)) |> 
+  select(Assay, logFC_Soma = logFC, pval_Soma = adj.P.Val)) |> 
+  filter(Assay%in% overlapping_assays) |> 
+  arrange(-pval_Olink)
+  ggplot(aes(-log10(pval_Olink), -log10(pval_Soma))) +
+  geom_point()
+
+
+
+
+de_healthy |> 
+  filter(Assay %in% overlapping_assays) |> 
+  ggplot(aes(-log10(pval_Olink), -log10(pval_Soma))) +
+  geom_point() +
+  facet_wrap(~Disease, scales = "free") 
+
+
+de_healthy |> 
+  filter(Assay %in% overlapping_assays) |> 
+  ggplot(aes(abs(logFC_Olink), abs(logFC_Soma))) +
+  geom_point() +
+  facet_wrap(~Disease, scales = "free") 
+
+
+de_healthy |> 
+  filter(Assay %in% overlapping_assays) |> 
+  group_by(Disease, Assay) %>%
+  slice_min(order_by = pval_Soma, n = 1) |> 
+  ungroup() |> 
+  mutate(sig_olink = ifelse(logFC_Olink > 0.1 & pval_Olink < 0.05, "Yes", "No"), 
+        sig_soma = ifelse(logFC_Soma > 0.1 & pval_Soma < 0.05, "Yes", "No"), 
+        sig_class = case_when(sig_olink == "Yes" & sig_soma == "Yes" ~ "Significant in both",
+        sig_olink == "Yes" & sig_soma == "No" ~ "Significant in Olink",
+        sig_olink == "No" & sig_soma == "Yes" ~ "Significant in SomaScan",
+        T ~ "Not significant in both"
+        )) |> 
+        count(Disease, sig_class) |> 
+    mutate(sig_class = factor(sig_class, levels = rev(c("Significant in both", "Significant in Olink", "Significant in SomaScan", "Not significant in both"))),
+    Disease = factor(Disease, levels = diseases)) |> 
+    ggplot(aes(Disease, n, fill = sig_class)) +
+    geom_col(alpha = 0.8) +
+    scale_fill_manual(values = pal_platform) +
+    coord_flip() +
+    theme_hpa() +
+    xlab("") +
+    ylab("Number of proteins") +
+    theme(legend.position = "top")
+
+
+  pal_platform <- c ("Significant in both" = "#322F81",
+"Significant in Olink" = "#4CC5F3",
+                  "Significant in SomaScan" = "#EC038A",
+                 "Not significant in both" = "grey") #322F81
+
+ggsave(savepath("de_summary.pdf"), h = 10, w = 5)
+
+```
+
+# Machine learning
+
+
+```{r}
+ split_olink <- hd_split_data(hd_olink, 
+                           variable = "Disease", 
+                           ratio = 0.8, 
+                           seed = 213, 
+                           metadata_cols = c("Sex", "Age"))
+
+model_disease_olink <- hd_model_rreg(split_olink, 
+                           case = NULL, 
+                           cv_sets = 5, 
+                           grid_size = 10) #, 
+                          # palette = "cancers12",
+                          # verbose = FALSE)
+
+
+# Feature plot
+feature_panel <- model_aml[["features"]] |>
+  filter(Scaled_Importance > 0.5) |>
+  mutate(Class = "AML") |>
+  bind_rows(model_gliom[["features"]] |>
+              filter(Scaled_Importance > 0.5) |>
+              mutate(Class = "GLIOM"),
+            model_ovc[["features"]] |>
+              filter(Scaled_Importance > 0.5) |>
+              mutate(Class = "OVC"))
+
+print(head(feature_panel))  # Preview of the feature panel
+
+hd_plot_feature_network(feature_panel,
+                        plot_color = "Scaled_Importance",
+                        class_palette = "cancers12")
+```
+
+
+
+## Age
+
+
+```{r}
+split_olink_age <- hd_split_data(hd_olink, variable = "Age", ratio = 0.8)
+
+model_olink_age <- hd_model_rreg(split_olink_age, 
+                           variable = "Age",
+                           case = NULL, 
+                           cv_sets = 5, 
+                           grid_size = 15,
+                           plot_title = c("rmse", "rsq", "features", "mixture"),
+                           verbose = TRUE)
+
+model_olink_age$final_workflow
+model_olink_age$comparison_plot
+model_olink_age$feat_imp_plot
+
+
+split_soma_age <- hd_split_data(hd_soma, variable = "Age", ratio = 0.8)
+
+model_soma_age <- hd_model_rreg(split_soma_age, 
+                           variable = "Age",
+                           case = NULL, 
+                           cv_sets = 5, 
+                           grid_size = 15,
+                           plot_title = c("rmse", "rsq", "features", "mixture"),
+                           verbose = TRUE)
+
 ```
