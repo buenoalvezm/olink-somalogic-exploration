@@ -1,62 +1,72 @@
 # Platform Correlations
 
+## Setup & Data
 ```{r}
+library(readr)
+library(readxl)
 library(dplyr)
 library(tidyr)
 library(ggplot2)
-library(readr)
-library(pheatmap)
-library(mcr)
-library(furrr)
-library(progressr)
+library(patchwork)
+library(HDAnalyzeR)
+library(ggpubr)
+library(stringr)
 ```
 
 ```{r}
 # Olink -----
-olink_b1 <- read_tsv("data/data_phase2_batch1_curated_20241217.tsv")
-olink_b4 <- read_tsv("data/data_phase2_batch4_curated_20250425.tsv")
-olink_b5 <- read_tsv("data/data_phase2_batch5_curated_20250701.tsv")
-common_olink_cols <- intersect(intersect(colnames(olink_b1), colnames(olink_b4)), colnames(olink_b5))
-common_olink_assays <- intersect(
-  intersect(
-    unique(olink_b1 |> pull(Assay)), 
-    unique(olink_b4 |> pull(Assay))
-  ), 
-  unique(olink_b5 |> pull(Assay))
-)
-
-olink <- bind_rows(
-  olink_b1 |> select(all_of(common_olink_cols)) |> filter(Assay %in% common_olink_assays) |> mutate(Batch = 1), 
-  olink_b4 |> select(all_of(common_olink_cols)) |> filter(Assay %in% common_olink_assays) |> mutate(Batch = 4),
-  olink_b5 |> select(all_of(common_olink_cols)) |> filter(Assay %in% common_olink_assays) |> mutate(Batch = 5)
-  ) |>
+olink <- read_tsv("data/data_phase2_HT_bridged_curated_subset_20251031.tsv") |>
     select("DAid", "Assay", "UniProt", "Batch", "NPX", "LOD")
 
-rm(olink_b1)
-rm(olink_b4)
-rm(olink_b5)
-
 # Soma -----
-soma_wide <- read_tsv("data/data_phase2_somalogic_curated_20250922.tsv")
-soma_meta <- read_tsv("data/meta_phase2_somalogic_20250922.tsv")
+soma_wide <- read_tsv("data/data_phase2_somalogic_curated_subset_20251031.tsv")
+soma_meta <- read_tsv("data/meta_phase2_somalogic_elod_20251028.tsv")
 
 soma <- soma_wide |>
   pivot_longer(cols = -c("DAid"), names_to = "AptName", values_to = "Value") |>
-  left_join(soma_meta |> filter(Organism == "Human") |> select(AptName, EntrezGeneSymbol), by = "AptName") |>
+  left_join(soma_meta |> filter(Organism == "Human") |> select(AptName,eLOD, EntrezGeneSymbol), by = "AptName") |>
   rename(Assay = EntrezGeneSymbol)
 
 rm(soma_wide)
-rm(soma_meta)
 
-sample_meta <- readxl::read_excel("data/samples_2025-10-10.xlsx") |>
-  select(DAid, Disease, Age, Sex, BMI)
+# Sample metadata ----
+sample_meta <- read_excel("data/samples_2025-10-10.xlsx") |>
+  mutate(
+    Disease = ifelse(Cohort == "PARD", Diagnose, Disease),
+    Disease = ifelse(Disease %in% c("Healthy control", "healthy", "Control"), "Healthy", Disease),
+    Disease = case_when(Disease == "Pancreatic ductal adenocarcinoma" ~ "Pancreatic cancer",
+                        Diagnose == "OVC" ~  "Ovarian cancer",
+                        Diagnose == "BRC" ~ "Breast cancer",
+                        Diagnose == "LUNG" ~ "Lung cancer",
+                        Diagnose == "CRC" ~ "Colorectal cancer",
+                        Diagnose == "PRC" ~ "Prostate cancer",
+                        Diagnose == "4_random" ~ "BAMSE - visit 4",
+                        Diagnose == "8_random" ~ "BAMSE - visit 8",
+                        Diagnose == "16_random" ~ "BAMSE - visit 16",
+                        Diagnose == "24_random" ~ "BAMSE - visit 24",
+                        Diagnose == "pregnancy" ~ "Pregnancy",
+                        Diagnose == "PD" ~ "Parkinson's disease",
+                        T ~ Disease),
+    Class = case_when(Disease %in% c("Breast cancer", "Colorectal cancer", "Lung cancer", "Ovarian cancer", "Prostate cancer") ~ "Cancer",
+                      Disease == "Parkinson's disease" ~ "Neurologic",
+                      Cohort == "BAMS" ~ "Healthy",
+                      Cohort == "PREG" ~ "Healthy",
+                      Disease == "Healthy" ~ "Healthy",
+                      T ~ Class)
+    ) |>
+  select(DAid, Cohort, Class, Disease, Age, Sex, BMI)
 
-gene_meta <- read_csv("data/gene_metadata.csv")
+# Other protein imformation ----
+gene_secretome <- read_csv("data/gene_secretome.csv")
 
-protein_tiers <- readxl::read_excel("data/proteins_classified_tiers.xlsx") |>
+protein_tiers <- read_excel("data/proteins_classified_tiers.xlsx") |>
   select(Assay = Gene, Tier = `confidence tier`) |>
   mutate(Tier = as.factor(Tier))
+
+diff_exp_proteins <- read_tsv("data/de_diseases_olink_soma_overlapping.tsv")
 ```
+
+Palettes
 
 ```{r}
 pal_secreted <- c(
@@ -72,6 +82,24 @@ pal_secreted <- c(
   "Intracellular and Membrane" = "#457B9D",
   "Not part of the secretome annotation" = "lightgrey"
 )
+
+disease_class <- c(
+  "Global" = "black",  # Add a color for Global
+  "Healthy" = "#C9B28F",
+  "Cardiovascular" = "#ED936B",
+  "Metabolic" = "#E0C59A",
+  "Cancer" = "#919FC7",
+  "Neurologic" = "#7DC0A6",
+  "Psychiatric" = "#7DC0A6",
+  "Infection" = "#F9DA56",
+  "Autoimmune" = "#DA8EC0"
+)
+```
+
+Define order:
+
+```{r}
+class_order <- c("Global", "Healthy", "Cardiovascular", "Metabolic", "Cancer", "Neurologic", "Autoimmune", "Infection")
 ```
 
 ## Global correlation of common proteins
@@ -88,20 +116,456 @@ soma <- soma |> filter(DAid %in% common_daids, Assay %in% common_assays)
 meta <- sample_meta |> filter(DAid %in% common_daids)
 ```
 
-Aptamers per assay.
+### Global and per Disease class
 
 ```{r}
-apt_per_assay <- soma |>
-  group_by(Assay) |>
-  summarise(n_apt = n_distinct(AptName))
+correlation <- olink |>
+  inner_join(soma, by = c("DAid", "Assay")) |>
+  group_by(Assay, AptName) |>
+  summarise(
+    correlation = if (sum(is.finite(NPX) & is.finite(Value)) > 1)
+      suppressWarnings(cor(NPX, Value, method = "spearman", use = "complete.obs"))
+    else
+      NA_real_,
+    .groups = "drop"
+  ) |>
+  mutate(Class = "Global")
 
-ggplot(apt_per_assay, aes(x = n_apt)) +
-  stat_bin(binwidth = 1, fill = "lightblue", alpha = 0.7) + 
-  labs(x = "Unique AptName Count", y = "Count") +
-  theme_bw()
+correlation_by_class <- olink |>
+  inner_join(soma, by = c("DAid", "Assay")) |>
+  inner_join(meta |> select(DAid, Class), by = "DAid") |>
+  group_by(Class, Assay, AptName) |>
+  summarise(
+    correlation = if (sum(is.finite(NPX) & is.finite(Value)) > 1)
+      suppressWarnings(cor(NPX, Value, method = "spearman", use = "complete.obs"))
+    else
+      NA_real_,
+    .groups = "drop"
+  )
+
+combined_correlation <- bind_rows(correlation, correlation_by_class) |>
+  mutate(Class = factor(Class, levels = class_order))
+
+ggplot(combined_correlation, aes(x = correlation, color = Class)) +
+  geom_density(na.rm = TRUE, size = 0.7) +
+  scale_color_manual(values = disease_class, na.value = "black") +
+  labs(x = "Spearman correlation (Olink vs Soma)", y = "Density", color = "Class") +
+  coord_cartesian(xlim = c(-1, 1)) +
+  theme_hd()
+
+ggsave("results/platform_corr_combined_density.png", width = 8, height = 6)
+
+median_corr_table <- combined_correlation |>
+  group_by(Class) |>
+  summarise(
+    median_correlation = median(correlation, na.rm = TRUE),
+    n_pairs = sum(!is.na(correlation)),
+    .groups = "drop"
+  )
+
+median_corr_table
 ```
 
-Spearman correlations. 
+
+### Correlations of Differential Expressed Proteins per Disease class
+
+```{r}
+# Step 1: Filter `DAid` for each `Class`
+class_datasets <- meta |>
+  group_by(Class) |>
+  summarise(DAids = list(DAid), .groups = "drop")
+
+# Step 2: Identify differentially expressed proteins for each `Class`
+diff_exp_proteins_plot <- diff_exp_proteins |>
+  mutate(
+    sig_Olink = sig_Olink %in% c("significant up", "significant down"),
+    sig_SomaScan = sig_SomaScan %in% c("significant up", "significant down"),
+    both_significant = sig_Olink & sig_SomaScan & (sig_Olink == sig_SomaScan) # Same direction
+  )
+
+diff_exp_proteins_by_class <- diff_exp_proteins_plot |>
+  group_by(Disease) |>
+  summarise(
+    olink_proteins = list(Assay[sig_Olink]),
+    soma_proteins = list(Assay[sig_SomaScan]),
+    both_proteins = list(Assay[both_significant]),
+    .groups = "drop"
+  )
+
+# Step 3: Calculate correlations for each Class and protein category
+correlation_results <- list()
+
+for (i in seq_len(nrow(class_datasets))) {
+  class_name <- class_datasets$Class[i]
+  daids <- class_datasets$DAids[[i]]
+  
+  # Filter Olink and Soma datasets for the current class
+  olink_filtered <- olink |> filter(DAid %in% daids)
+  soma_filtered <- soma |> filter(DAid %in% daids)
+  
+  # Get differentially expressed proteins for the current class
+  disease_name <- unique(meta |> filter(Class == class_name) |> pull(Disease))
+  diff_proteins <- diff_exp_proteins_by_class |>
+    filter(Disease %in% disease_name)
+  
+  olink_proteins <- unlist(diff_proteins$olink_proteins)
+  soma_proteins <- unlist(diff_proteins$soma_proteins)
+  both_proteins <- unlist(diff_proteins$both_proteins)
+  
+  # Calculate correlations for each protein category
+  for (category in c("All Proteins", "Diff Expressed in Olink", "Diff Expressed in Soma", "Diff Expressed in Both")) {
+    if (category == "All Proteins") {
+      olink_subset <- olink_filtered
+      soma_subset <- soma_filtered
+    } else if (category == "Diff Expressed in Olink") {
+      olink_subset <- olink_filtered |> filter(Assay %in% olink_proteins)
+      soma_subset <- soma_filtered |> filter(Assay %in% olink_proteins)
+    } else if (category == "Diff Expressed in Soma") {
+      olink_subset <- olink_filtered |> filter(Assay %in% soma_proteins)
+      soma_subset <- soma_filtered |> filter(Assay %in% soma_proteins)
+    } else if (category == "Diff Expressed in Both") {
+      olink_subset <- olink_filtered |> filter(Assay %in% both_proteins)
+      soma_subset <- soma_filtered |> filter(Assay %in% both_proteins)
+    }
+    
+    # Calculate correlations for the current category
+    correlation_data <- olink_subset |>
+      inner_join(soma_subset, by = c("DAid", "Assay")) |>
+      group_by(Assay) |>
+      summarise(
+        correlation = if (sum(is.finite(NPX) & is.finite(Value)) > 1)
+          suppressWarnings(cor(NPX, Value, method = "spearman", use = "complete.obs"))
+        else
+          NA_real_,
+        .groups = "drop"
+      ) |>
+      mutate(Class = class_name, column = category)
+    
+    # Store the results
+    correlation_results[[paste(class_name, category)]] <- correlation_data
+  }
+}
+
+disease_class_order <- c("Healthy", "Cardiovascular", "Metabolic", "Cancer", "Neurologic", "Autoimmune", "Infection")
+correlation_df <- bind_rows(correlation_results) |>
+  mutate(
+    column = factor(column, levels = c("All Proteins", "Diff Expressed in Olink", "Diff Expressed in Soma", "Diff Expressed in Both")),
+    Class = factor(Class, levels = disease_class_order)
+  )
+
+# Calculate median correlation for each facet
+median_corr <- correlation_df |>
+  group_by(Class, column) |>
+  summarise(median_correlation = median(correlation, na.rm = TRUE), .groups = "drop")
+
+ggplot(correlation_df, aes(x = correlation, color = Class)) +
+  geom_density(na.rm = TRUE, size = 0.7) +
+  geom_text(
+    data = median_corr,
+    aes(x = -0.9, y = Inf, label = paste0("ρ = ", round(median_correlation, 2))),
+    inherit.aes = FALSE,
+    hjust = 0, vjust = 1.5, size = 3
+  ) +
+  scale_color_manual(values = disease_class, na.value = "lightgrey") +
+  facet_grid(Class ~ column, scales = "free") +
+  labs(x = "Spearman correlation (Olink vs Soma)", y = "Density", color = "Class") +
+  theme_hd()
+
+ggsave("results/platform_corr_by_class_density_ordered.png", width = 10, height = 8)
+```
+
+The same but for diseases.
+
+```{r}
+# Ensure# Step 1: Filter `DAid` for each `Disease`
+disease_datasets <- meta |>
+  group_by(Disease, Class) |>
+  summarise(DAids = list(DAid), .groups = "drop")
+
+# Step 2: Identify differentially expressed proteins for each `Disease`
+diff_exp_proteins_by_disease <- diff_exp_proteins_plot |>
+  group_by(Disease) |>
+  summarise(
+    olink_proteins = list(Assay[sig_Olink]),
+    soma_proteins = list(Assay[sig_SomaScan]),
+    both_proteins = list(Assay[both_significant]),
+    .groups = "drop"
+  )
+
+# Step 3: Calculate correlations for each Disease and protein category
+correlation_results <- list()
+
+for (i in seq_len(nrow(disease_datasets))) {
+  disease_name <- disease_datasets$Disease[i]
+  class_name <- disease_datasets$Class[i]
+  daids <- disease_datasets$DAids[[i]]
+  
+  # Filter Olink and Soma datasets for the current disease
+  olink_filtered <- olink |> filter(DAid %in% daids)
+  soma_filtered <- soma |> filter(DAid %in% daids)
+  
+  # Get differentially expressed proteins for the current disease
+  diff_proteins <- diff_exp_proteins_by_disease |>
+    filter(Disease == disease_name)
+  
+  olink_proteins <- unlist(diff_proteins$olink_proteins)
+  soma_proteins <- unlist(diff_proteins$soma_proteins)
+  both_proteins <- unlist(diff_proteins$both_proteins)
+  
+  # Calculate correlations for each protein category
+  for (category in c("All Proteins", "Diff Expressed in Olink", "Diff Expressed in Soma", "Diff Expressed in Both")) {
+    if (category == "All Proteins") {
+      olink_subset <- olink_filtered
+      soma_subset <- soma_filtered
+    } else if (category == "Diff Expressed in Olink") {
+      olink_subset <- olink_filtered |> filter(Assay %in% olink_proteins)
+      soma_subset <- soma_filtered |> filter(Assay %in% olink_proteins)
+    } else if (category == "Diff Expressed in Soma") {
+      olink_subset <- olink_filtered |> filter(Assay %in% soma_proteins)
+      soma_subset <- soma_filtered |> filter(Assay %in% soma_proteins)
+    } else if (category == "Diff Expressed in Both") {
+      olink_subset <- olink_filtered |> filter(Assay %in% both_proteins)
+      soma_subset <- soma_filtered |> filter(Assay %in% both_proteins)
+    }
+    
+    # Calculate correlations for the current category
+    correlation_data <- olink_subset |>
+      inner_join(soma_subset, by = c("DAid", "Assay")) |>
+      group_by(Assay) |>
+      summarise(
+        correlation = if (sum(is.finite(NPX) & is.finite(Value)) > 1)
+          suppressWarnings(cor(NPX, Value, method = "spearman", use = "complete.obs"))
+        else
+          NA_real_,
+        .groups = "drop"
+      ) |>
+      mutate(Disease = disease_name, Class = class_name, column = category)
+    
+    # Store the results
+    correlation_results[[paste(disease_name, category)]] <- correlation_data
+  }
+}
+
+# Combine all results into a single dataframe
+correlation_df <- bind_rows(correlation_results) |>
+  mutate(
+    column = factor(column, levels = c("All Proteins", "Diff Expressed in Olink", "Diff Expressed in Soma", "Diff Expressed in Both")),
+    Class = factor(Class, levels = disease_class_order)  # Ensure correct class order
+  ) |>
+  filter(!Disease %in% c("Healthy", "BAMSE - visit 16", "BAMSE - visit 24", "BAMSE - visit 4", "BAMSE - visit 8")) |>
+  mutate(
+    Disease = factor(Disease, levels = meta |>
+      mutate(Class = factor(Class, levels = disease_class_order)) |>  # Set correct class order
+      arrange(Class, Disease) |> 
+      pull(Disease) |> 
+      unique())
+  )
+
+# Calculate median correlation for each facet
+median_corr <- correlation_df |>
+  group_by(Disease, column) |>
+  summarise(median_correlation = median(correlation, na.rm = TRUE), .groups = "drop")
+
+ggplot(correlation_df, aes(x = correlation, color = Class)) +
+  geom_density(na.rm = TRUE, size = 0.7) +
+  geom_text(
+    data = median_corr,
+    aes(x = -0.9, y = Inf, label = paste0("ρ = ", round(median_correlation, 2))),
+    inherit.aes = FALSE,
+    hjust = 0, vjust = 1.5, size = 3
+  ) +
+  scale_color_manual(values = disease_class, na.value = "lightgrey") +
+  facet_grid(Disease ~ column) +  # Facet by Disease
+  labs(x = "Spearman correlation (Olink vs Soma)", y = "Density", color = "Class") +
+  theme_hd() +
+  theme(
+    strip.text.y = element_text(angle = 0),
+    strip.text = element_text(size = 8)
+  )
+
+ggsave("results/platform_corr_by_disease_diffexp.png", width = 12, height = 20)
+```
+
+Is the correlation per class much different than the global correlation?
+
+```{r}
+# Step 1: Calculate global correlations
+global_corr <- olink |>
+  inner_join(soma, by = c("DAid", "Assay")) |>
+  group_by(Assay) |>
+  summarise(
+    Global_corr = if (sum(is.finite(NPX) & is.finite(Value)) > 1)
+      suppressWarnings(cor(NPX, Value, method = "spearman", use = "complete.obs"))
+    else
+      NA_real_,
+    .groups = "drop"
+  )
+
+# Step 2: Calculate correlations per class
+class_corr <- olink |>
+  inner_join(soma, by = c("DAid", "Assay")) |>
+  inner_join(meta |> select(DAid, Class), by = "DAid") |>
+  group_by(Assay, Class) |>
+  summarise(
+    corr = if (sum(is.finite(NPX) & is.finite(Value)) > 1)
+      suppressWarnings(cor(NPX, Value, method = "spearman", use = "complete.obs"))
+    else
+      NA_real_,
+    .groups = "drop"
+  ) |>
+  pivot_wider(names_from = Class, values_from = corr, names_prefix = "Corr_Class_")
+
+# Step 3: Calculate correlations per disease
+disease_corr <- olink |>
+  inner_join(soma, by = c("DAid", "Assay")) |>
+  inner_join(meta |> select(DAid, Disease), by = "DAid") |>
+  group_by(Assay, Disease) |>
+  summarise(
+    corr = if (sum(is.finite(NPX) & is.finite(Value)) > 1)
+      suppressWarnings(cor(NPX, Value, method = "spearman", use = "complete.obs"))
+    else
+      NA_real_,
+    .groups = "drop"
+  ) |>
+  pivot_wider(names_from = Disease, values_from = corr, names_prefix = "Corr_Disease_")
+
+# Step 4: Add differential expression information
+diff_exp_info <- diff_exp_proteins |>
+  select(Assay, Disease, sig_Olink, sig_SomaScan) |>
+  pivot_wider(
+    names_from = Disease,
+    values_from = c(sig_Olink, sig_SomaScan),
+    names_glue = "{.value}_{Disease}"
+  )
+
+# Step 5: Combine all information into a single dataframe
+protein_summary <- global_corr |>
+  left_join(class_corr, by = "Assay") |>
+  left_join(disease_corr, by = "Assay") |>
+  left_join(diff_exp_info, by = "Assay")
+
+write.table(protein_summary, file='data/platform_corr_summary_maria.tsv', quote=FALSE, sep='\t', col.names = NA)
+```
+
+Calculate deltas for classes and plot selected examples.
+
+```{r}
+# Step 1: Calculate deltas for classes
+class_deltas <- class_corr |>
+  pivot_longer(cols = starts_with("Corr_Class_"), names_to = "Class", values_to = "Class_corr") |>
+  mutate(Class = str_remove(Class, "Corr_Class_")) |>
+  left_join(global_corr, by = "Assay") |>
+  mutate(delta_class = abs(Class_corr - Global_corr)) |>
+  filter(Class_corr > 0, Class_corr > Global_corr)  # Only keep positive class correlations better than global
+
+# Step 2: Define the selected examples
+selected_examples <- tibble::tibble(
+  Class = c(
+    rep("Cancer", 3),
+    rep("Metabolic", 4),
+    rep("Cardiovascular", 2),
+    rep("Infection", 2),
+    rep("Autoimmune", 2),
+    rep("Neurologic", 2)
+  ),
+  Assay = c(
+    "LTAH4", "ENPP2", "CCL21",
+    "FGR", "CAMK4", "PADI2", "PADI4",
+    "PTN", "TNNI3",
+    "TNFRSF8", "TK1",
+    "VAV3", "NUDT2",
+    "PRDX6", "HAGH"
+  )
+)
+
+# Step 3: Prepare the data for plotting
+scatter_data <- list()
+
+for (i in seq_len(nrow(selected_examples))) {
+  assay <- selected_examples$Assay[i]
+  
+  for (class in class_order) {
+    # Filter the data for the current assay and class
+    filtered_data <- if (class == "Global") {
+      olink |>
+        inner_join(soma, by = c("DAid", "Assay")) |>
+        filter(Assay == assay)
+    } else {
+      olink |>
+        inner_join(soma, by = c("DAid", "Assay")) |>
+        inner_join(meta |> filter(Class == class), by = "DAid") |>
+        filter(Assay == assay)
+    }
+    
+    # Calculate the Spearman correlation
+    correlation <- filtered_data |>
+      summarise(
+        rho = if (sum(is.finite(NPX) & is.finite(Value)) > 1)
+          suppressWarnings(cor(NPX, Value, method = "spearman", use = "complete.obs"))
+        else
+          NA_real_
+      ) |>
+      pull(rho)
+    
+    # Add the data to the list
+    scatter_data[[paste(assay, class)]] <- filtered_data |>
+      mutate(
+        Class = class,
+        Assay = assay,
+        rho = correlation
+      )
+  }
+}
+
+# Step 4: Combine all data into a single dataframe
+scatter_data <- bind_rows(scatter_data) |>
+  mutate(Class = factor(Class, levels = class_order))
+
+# Step 5: Create a dataframe for labels
+label_df <- scatter_data |>
+  group_by(Assay, Class) |>
+  summarise(
+    x = max(NPX, na.rm = TRUE),  # Use max or Inf for positioning
+    y = max(Value, na.rm = TRUE),
+    rho = first(rho),  # Use the first (or unique) correlation value
+    .groups = "drop"
+  ) |>
+  mutate(label = paste0(
+    "ρ = ", round(rho, 2)
+  ))
+
+# Step 6: Plot the scatterplots
+ggplot(scatter_data, aes(x = NPX, y = Value)) +
+  geom_point(aes(color = Class), alpha = 0.6) +
+  geom_smooth(method = "auto", se = TRUE, color = "black") +
+  geom_text(
+    data = label_df,
+    aes(x = -Inf, y = Inf, label = label),
+    hjust = -0.05, vjust = 1.2, size = 3
+  ) +
+  scale_color_manual(values = disease_class) +
+  facet_grid(Assay ~ Class) +
+  labs(x = "Olink (NPX)", y = "SomaScan (log2RFU)") +
+  theme_hd() +
+  theme(
+    strip.text.x = element_text(size = 10),
+    strip.text.y = element_text(size = 10),
+    axis.text = element_text(size = 8),
+    axis.title = element_text(size = 10)
+  )
+
+# Save the plot
+ggsave("results/selected_examples_scatterplots_all_assays.png", width = 12, height = 10)
+```
+
+
+
+
+
+
+
+
+
 
 ```{r}
 # Calculate the Spearman correlation for each common Assay
@@ -127,29 +591,6 @@ ggplot(correlation, aes(x = correlation, fill = secretome_annotation)) +
   theme_bw()
 
 ggsave("results/platform_corr_global.png", width = 8, height = 4)
-```
-
-```{r}
-# Calculate the Spearman correlation for each common Assay for each Olink batch
-# correlation <- olink |>
-#   inner_join(soma, by = c("DAid", "Assay")) |>
-#   group_by(Assay, AptName, Batch) |>
-#   summarise(correlation = cor.test(NPX, Value, method = "spearman")$estimate) |>
-#   dplyr::ungroup()
-
-# median_correlation <- correlation |>
-#   pull(correlation) |>
-#   median()
-
-# # Plot a histogram of the correlation coefficient
-# ggplot(correlation, aes(x = correlation)) +
-#   stat_bin(binwidth = 0.1, fill = "lightblue", alpha = 0.7) + 
-#   geom_vline(aes(xintercept = median_correlation), linetype = "dashed", color = "black") +
-#   geom_text(x = median_correlation + 0.2, y = 2500, label = round(median_correlation, 4), color = "black", size = 5) +
-#   labs(x = "Correlation Coefficient", y = "Count") +
-#   theme_bw()
-
-# ggsave("results/platform_corr_global_perbatch.png", width = 4, height = 3)
 ```
 
 Per samples correlation
@@ -355,6 +796,30 @@ ggplot(correlation_binned, aes(x = bin, y = correlation, fill = Tier)) +
 
 
 ggsave("results/platform_corr_global_bins_tiers.png", width = 10, height = 4)
+
+# Compute median correlation per Tier
+median_correlation <- correlation_binned |>
+  group_by(Tier) |>
+  summarise(median_correlation = median(correlation, na.rm = TRUE))
+
+# Plot faceted histograms with median lines
+ggplot(correlation_binned, aes(x = correlation, fill = Tier)) +
+  geom_histogram(color = "black", position = "identity") +
+  geom_vline(
+    data = median_correlation,
+    aes(xintercept = median_correlation),
+    linetype = "dashed",
+    color = "black"
+  ) +
+  facet_wrap(~Tier) +
+  theme_bw() +
+  scale_fill_brewer() +
+  labs(
+    x = "Correlation Coefficient",
+    y = "Count"
+  )
+
+ggsave("results/platform_corr_global_hist_tiers.png", width = 10, height = 4)
 ```
 
 Correlations for Assays/Samples above LOD vs bellow LOD (Olink)
@@ -403,55 +868,6 @@ ggplot(correlation, aes(x = correlation)) +
 
 ggsave("results/platform_corr_global_LOD_split.png", width = 6, height = 3)
 
-```
-
-```{r}
-# Compute correlation including all sample
-r_all <- olink |>
-  inner_join(soma, by = c("DAid", "Assay")) |>
-  group_by(Assay, AptName) |>
-  summarise(
-    r_all = if (sum(is.finite(NPX) & is.finite(Value)) > 1)
-      suppressWarnings(cor(NPX, Value, method = "spearman", use = "complete.obs"))
-    else
-      NA_real_,
-    .groups = "drop"
-  )
-
-# Compute correlation for detected (above LOD) samples only
-r_detected <- olink |>
-  filter(NPX >= LOD) |>
-  inner_join(soma, by = c("DAid", "Assay")) |>
-  group_by(Assay, AptName) |>
-  summarise(
-    r_detected_only = if (sum(is.finite(NPX) & is.finite(Value)) > 1)
-      suppressWarnings(cor(NPX, Value, method = "spearman", use = "complete.obs"))
-    else
-      NA_real_,
-    .groups = "drop"
-  )
-
-comparison <- inner_join(r_all, r_detected, by = c("Assay", "AptName")) |>
-  mutate(delta_r = r_detected_only - r_all) |>
-  left_join(below_LOD, by = "Assay")
-
-# Identify proteins where correlation collapses (large negative delta)
-collapsed_proteins <- comparison |>
-  filter(!is.na(r_all), !is.na(r_detected_only)) |>
-  filter(r_all < 0.3 & r_detected_only > 0.7) |>
-  arrange(r_all)
-
-ggplot(comparison, aes(x = r_all, y = r_detected_only, color = bin)) +
-  geom_point(alpha = 0.6) +
-  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
-  labs(
-    x = "Spearman correlation (all samples)",
-    y = "Spearman correlation (samples above LOD)"
-  ) +
-  scale_colour_brewer(palette = "Set1") +
-  theme_bw()
-
-ggsave("results/platform_corr_global_scatter_detected_vs_all.png", width = 7, height = 5)
 ```
 
 Soma intra-correlation vs correlation with Olink
@@ -608,75 +1024,6 @@ ggplot(cmp_stats, aes(x = logCV_olink, y = logCV_soma, z = r_all)) +
 ggsave("results/cv_soma_vs_cv_olink_heatmap.png", width = 6, height = 5)
 ```
 
-Deming regression per assay/aptamer. Most proteins show small proportional and additive biases: slopes near 0–1, intercepts ~10.
-A few extreme outliers distort summary statistics; these likely correspond to very low-abundance proteins or proteins with multiple aptamers that are inconsistent.
-
-```{r}
-merged_data <- olink |>
-  inner_join(soma, by = c("DAid", "Assay"))
-
-# Compute Deming regression per protein
-groups <- merged_data |> group_by(Assay, AptName) |> group_split()
-group_keys <- merged_data |> group_by(Assay, AptName) |> group_keys()
-
-plan(multisession, workers = 8)
-handlers(global = TRUE)
-
-deming_results <- future_map2_dfr(groups, seq_along(groups), ~{
-  df <- .x
-  ok <- is.finite(df$NPX) & is.finite(df$Value)
-  if(sum(ok) > 2){
-    fit <- mcreg(x = df$NPX[ok], y = df$Value[ok], method.reg = "Deming", error.ratio = 1)
-    tibble(Assay = df$Assay[1], AptName = df$AptName[1],
-           slope = fit@para[2,1], intercept = fit@para[1,1])
-  } else {
-    tibble(Assay = df$Assay[1], AptName = df$AptName[1],
-           slope = NA_real_, intercept = NA_real_)
-  }
-}, .progress = TRUE, seed = TRUE)
-
-# Filter out extreme outliers
-slope_limits <- quantile(deming_results$slope, probs = c(0.005, 0.995), na.rm = TRUE)
-intercept_limits <- quantile(deming_results$intercept, probs = c(0.005, 0.995), na.rm = TRUE)
-
-deming_filtered <- deming_results |>
-  filter(slope >= slope_limits[1], slope <= slope_limits[2],
-         intercept >= intercept_limits[1], intercept <= intercept_limits[2])
-
-# Plot slope distribution
-ggplot(deming_filtered, aes(x = slope)) +
-  geom_histogram(binwidth = 0.1, fill = "lightblue", color = "black") +
-  labs(title = "Deming slopes (SomaScan ~ Olink)", x = "Slope", y = "Count") +
-  theme_bw()
-
-ggsave("results/deming_slope_distribution.png", width = 5, height = 4)
-
-# Plot intercept distribution
-ggplot(deming_filtered, aes(x = intercept)) +
-  geom_histogram(binwidth = 0.1, fill = "salmon", color = "black") +
-  labs(title = "Deming intercepts (SomaScan ~ Olink)", x = "Intercept", y = "Count") +
-  theme_bw()
-
-ggsave("results/deming_intercept_distribution.png", width = 5, height = 4)
-
-# Plot slope vs mean abundance
-mean_abundance <- merged_data |>
-  group_by(Assay, AptName) |>
-  summarise(mean_olink = mean(NPX, na.rm = TRUE),
-            mean_soma  = mean(Value, na.rm = TRUE),
-            .groups = "drop")
-
-deming_plot <- deming_filtered |>
-  left_join(mean_abundance, by = c("Assay", "AptName"))
-
-ggplot(deming_plot, aes(x = mean_olink, y = slope)) +
-  geom_point(alpha = 0.6) +
-  geom_smooth(method = "loess", se = TRUE, color = "black") +
-  labs(x = "Mean Olink NPX", y = "Deming slope", title = "Proportional bias vs mean abundance") +
-  theme_bw()
-
-ggsave("results/deming_slope_vs_mean_olink.png", width = 5, height = 4)
-```
 
 ## Plot individual assay scatter plots
 
