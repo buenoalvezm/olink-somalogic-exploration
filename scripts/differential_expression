@@ -1,0 +1,445 @@
+---
+title: "Differential expression"
+format: html
+---
+
+
+# Set up
+
+```{r}
+library(tidyverse)
+library(limma)
+library(MatchIt)
+library(HDAnalyzeR)
+library(mbaRtools)
+
+# Data
+data_soma_wide <- read_tsv("../../Data/Somascan/processed/data_phase2_somalogic_curated_subset_20251031.tsv")
+data_olink <- read_tsv("../../Data/Olink/processed/data_phase2_HT_bridged_curated_subset_20251031.tsv")
+meta_soma <- read_tsv("../../Data/Somascan/processed/meta_phase2_somalogic_elod_20251028.tsv")
+meta <- read_tsv("../../Data/metadata/meta_phase2_hpav25_20251031.tsv")
+
+# Soma data in long format
+data_soma <- 
+  data_soma_wide |> 
+  pivot_longer(names_to = "AptName", values_to = "log2RFU", cols = -DAid) |> 
+  left_join(meta_soma |> 
+    select(AptName, Assay = EntrezGeneSymbol), by = "AptName")
+```
+
+# Overlapping proteins
+
+```{r}
+ht_assays <- 
+  data_olink |> 
+  distinct(Assay) |> 
+  pull()
+
+soma_assays <- 
+  meta_soma |> 
+  distinct(EntrezGeneSymbol) |> 
+  pull()
+
+overlapping_assays <- intersect(ht_assays, soma_assays)
+length(overlapping_assays)
+```
+# Functions
+
+```{r}
+# Select diseases to perform analyses
+meta_disease <- 
+    meta |> 
+    filter(Cohort != "BAMS")
+
+diseases <- 
+  meta_disease |> 
+  distinct(Disease, Class, Cohort) |> 
+  filter(Disease != "Healthy (Adult)") |> 
+  arrange(Class, Disease) |> 
+  pull(Disease)
+
+classes <-
+  meta_disease |>
+  filter(Class != "Healthy") |>
+  distinct(Class) |>
+  arrange(Class) |> 
+  pull()
+
+# Function to match case samples to controls (from Science paper)
+match_samples <-  function(metadata,
+                           case,
+                           control) {
+  n_males <-
+    metadata |>
+    filter(Disease == case,
+           Sex == "M") |>
+    nrow()
+  
+  n_females <-
+    metadata |>
+    filter(Disease == case,
+           Sex == "F") |>
+    nrow()
+  
+  if (n_males == 0 & n_females > 0) {
+    metadata <-
+      metadata |>
+      filter(Sex == "F")
+    
+  } else if (n_males > 0 & n_females == 0) {
+    metadata <-
+      metadata |>
+      filter(Sex == "M")
+    
+  } else {
+    metadata <- metadata
+  }
+  
+  dat <-
+    metadata |>
+    filter(Disease %in% c(case, control), !is.na(Sex), !is.na(Age)) |>
+    mutate(Disease = factor(Disease, levels = c(control, case)))
+  
+  if (n_males == 0 | n_females == 0) {
+    set.seed(213)
+    output <- matchit(
+      Disease ~ Age,
+      data = dat,
+      method = "nearest",
+      distance = "glm"
+    )
+    
+  } else {
+    set.seed(213)
+    output <- matchit(
+      Disease ~ Age + Sex,
+      data = dat,
+      method = "nearest",
+      distance = "glm"
+    )
+  }
+  
+  match.data(output)
+  
+}
+
+# Function to run differential expression using limma (from Science paper)
+do_limma_disease <-
+  function(data_wide,
+           metadata,
+           disease,
+           controls,
+           correct = T,
+           cutoff = 0) {
+    # Select current disease
+    dat <-
+      data_wide %>%
+      inner_join(metadata %>%
+                   select(DAid, Sex, Age, BMI, Disease), by = "DAid") %>%
+      rename(Group = Disease) %>%
+      mutate(Group = ifelse(Group == disease, "1_Case", "0_Control"))
+    
+    n_males <-
+      metadata |>
+      filter(Disease == disease,
+             Sex == "M") |>
+      nrow()
+    
+    n_females <-
+      metadata |>
+      filter(Disease == disease,
+             Sex == "F") |>
+      nrow()
+    
+    if (correct == T) {
+      dat <-
+        dat |>
+        filter(!is.na(Sex), !is.na(Age))
+    } else {
+      dat <- dat
+    }
+    
+    # Design a model
+    if (correct == T) {
+      if (n_males == 0 | n_females == 0) {
+        design <- model.matrix(~ 0 + as.factor(dat$Group) + dat$Age)
+        colnames(design) <- c("control", "case", "Age")
+      } else {
+        design <-
+          model.matrix(~ 0 + as.factor(dat$Group) + as.factor(dat$Sex) + dat$Age)
+        colnames(design) <- c("control", "case",  "Sex", "Age")
+      }
+      
+    } else {
+      design <- model.matrix(~ 0 + as.factor(dat$Group))
+      colnames(design) <- c("control", "case")
+    }
+    
+    # Make contrast
+    contrast <-
+      makeContrasts(Diff = case - control, levels = design)
+    
+    # Fit linear model to each protein assay
+    dat_fit <-
+      dat %>%
+      select(-Sex, -Age, -BMI, -Group)  %>%
+      column_to_rownames("DAid") %>%
+      t()
+    
+    fit <-
+      lmFit(dat_fit, design = design, maxit = 100000) #method = "robust",
+    
+    # Apply contrast
+    contrast_fit <- contrasts.fit(fit, contrast)
+    
+    # Apply empirical Bayes smoothing to the SE
+    ebays_fit <- eBayes(contrast_fit, robust = T)
+    
+    # Extract DE results
+    DE_results <-
+      topTable(
+        ebays_fit,
+        n = nrow(ebays_fit$p.value),
+        adjust.method = "fdr",
+        confint = TRUE
+      )
+    
+    DE_res <-
+      DE_results %>%
+      as_tibble(rownames = "Assay") %>%
+      mutate(
+        Disease = disease,
+        sig = case_when(
+          adj.P.Val < 0.05 & logFC < -cutoff ~ "significant down",
+          adj.P.Val < 0.05 &
+            logFC > cutoff ~ "significant up",
+          T ~ "not significant"
+        ),
+        Control = controls
+      )
+    
+    return(DE_res)
+  }
+```
+
+# Differential expression
+
+## Other diseases
+
+
+```{r}
+de_diseases <-
+  map_df(as.character(diseases), function(disease) {
+    message("Processing disease: ", disease)
+    
+    # Find control diseases
+    diseases_control <-
+      meta_disease |>
+      distinct(Disease) |>
+      filter(Disease != disease,
+             Disease != "Healthy")
+    
+    n_males <-
+      meta_disease |>
+      filter(Disease == disease,
+             Sex == "M") |>
+      nrow()
+    
+    n_females <-
+      meta_disease |>
+      filter(Disease == disease,
+             Sex == "F") |>
+      nrow()
+    
+    # Filter controls based on gender-specific diseases
+    if (n_males == 0 & n_females > 0) {
+      diseases_control <-
+        meta_disease |>
+        filter(!Disease %in% disease,
+               Disease != "Healthy") |>
+        group_by(Disease) |>
+        count(Sex) |>
+        filter(Sex == "F") |>
+        pull(Disease)
+      
+    } else if (n_males > 0 & n_females == 0) {
+      diseases_control <-
+        meta_disease |>
+        filter(!Disease %in% disease,
+               Disease != "Healthy") |>
+        group_by(Disease) |>
+        count(Sex) |>
+        filter(Sex == "M") |>
+        pull(Disease)
+      
+    } else {
+      diseases_control <-
+        diseases_control |>
+        pull(Disease)
+      
+    }
+    
+    # Match controls for each disease in diseases_control
+    controls_meta <-
+      map_df(diseases_control, function(control_disease) {
+        matched_controls <-
+          match_samples(metadata = meta_disease,
+                        case = disease,
+                        control = control_disease)
+        
+        matched_controls |>
+          filter(Disease == control_disease)
+        
+      })
+    
+    # Combine disease and control metadata
+    disease_meta <-
+      meta_disease |>
+      filter(Disease == disease) |>
+      bind_rows(controls_meta) |>
+      mutate(Disease = ifelse(Disease == disease, disease, "Control")) |>
+      select(DAid = DAid, Disease, Sex, Age, BMI)
+    
+    # Olink differntial abunance
+    disease_data_olink <-
+      data_olink |>
+      filter(DAid %in% disease_meta$DAid) |>
+      select(DAid, Assay, NPX) |>
+      pivot_wider(names_from = "Assay", values_from = "NPX")
+    
+    disease_res_olink <-
+      do_limma_disease(
+        data_wide = disease_data_olink,
+        metadata = disease_meta,
+        disease = disease,
+        cutoff = 0.5,
+        controls = "All other diseases",
+        correct = T
+      ) |> 
+        mutate(Platform = "Olink")
+
+    # Soma differential abundance
+    disease_data_soma <-
+      data_soma |>
+      filter(DAid %in% disease_meta$DAid) |>
+      select(DAid, AptName, log2RFU) |>
+      pivot_wider(names_from = "AptName", values_from = "log2RFU")
+    
+    disease_res_soma <-
+      do_limma_disease(
+        data_wide = disease_data_soma,
+        metadata = disease_meta,
+        disease = disease,
+        cutoff = 0,
+        controls = "All other diseases",
+        correct = T
+      ) |> 
+        mutate(Platform = "SomaScan") |> 
+        rename(AptName = Assay) |>  # Map aptamer to protein names
+        left_join(meta_soma |> select(AptName, Assay = EntrezGeneSymbol), by = "AptName") |> 
+        relocate(Assay)
+
+
+   # Merge 
+   disease_res_soma |> 
+    bind_rows(disease_res_olink) |> 
+    relocate(Disease, Control, Assay, AptName, Platform)
+    
+  })
+
+
+write_tsv(de_diseases, "data/processed/de_diseases_olink_soma.tsv") # long format, combined
+
+
+# Overlapping - wide format
+de_diseases_overlapping <- 
+    de_diseases |> 
+    filter(Assay %in% overlapping_assays) |> 
+    group_by(Disease, Assay, Platform) |> 
+    arrange(adj.P.Val, logFC) |>     # choose a secondary sorting column
+    slice(1) |>                       # always pick exactly one row
+    ungroup() |>
+    select(Disease, Assay, Platform, logFC, adj.P.Val, sig) |> 
+    pivot_wider(names_from = Platform, values_from = c(logFC, adj.P.Val, sig)) |> 
+    mutate(Disease = factor(Disease, levels = diseases)) |> 
+    arrange(Disease, Assay)
+
+write_tsv(de_diseases_overlapping, "data/processed/de_diseases_olink_soma_overlapping.tsv") # wide format, overlapping
+```
+
+
+### Summaries
+
+```{r}
+de_diseases |> 
+    count(Disease, Platform, sig) |> 
+    mutate(Disease = factor(Disease, levels = rev(diseases))) |> 
+    ggplot(aes(Disease, n, fill = sig)) +
+    geom_col() +
+    facet_wrap(~Platform, scales = "free_x") +
+    coord_flip() +
+    scale_fill_hpa(palette = "de") +
+    theme_hpa()
+
+ggsave(savepath("overview_de_olink_soma.png"), h = 8, w = 8)
+
+  pal_platform <- c ("Significant in both" = "#322F81",
+"Significant in Olink" = "#4CC5F3",
+                  "Significant in SomaScan" = "#EC038A",
+                 "Not significant in both" = "grey") #322F81
+de_diseases_overlapping |> 
+    mutate(
+        sig_class = case_when(sig_Olink != "not significant" & sig_SomaScan != "not significant" ~ "Significant in both",
+        sig_Olink != "not significant" & sig_SomaScan == "not significant" ~ "Significant in Olink",
+        sig_Olink == "not significant" & sig_SomaScan != "not significant" ~ "Significant in SomaScan",
+        T ~ "Not significant in both"
+        )) |> 
+        count(Disease, sig_class) |> 
+            mutate(sig_class = factor(sig_class, levels = rev(c("Significant in both", "Significant in Olink", "Significant in SomaScan", "Not significant in both"))),
+    Disease = factor(Disease, levels = rev(diseases))) |> 
+         ggplot(aes(Disease, n, fill = sig_class)) +
+         geom_col(alpha = 0.8) +
+         scale_fill_manual(values = pal_platform) +
+         coord_flip() +
+         theme_hpa() +
+         xlab("") +
+         ylab("Number of proteins") +
+         ggtitle("Overlapping assays")
+         #theme(legend.position = "top")
+
+ggsave(savepath("overview_de_olink_soma_overlapping.png"), h = 8, w = 8)
+```
+
+## Healthy (needs to be adjusted from Science paper)
+
+
+```{r}
+de_healthy <-
+  map_df(as.character(diseases), function(disease) {
+    message("Processing disease: ", disease)
+    
+    disease_healthy_meta <-
+      match_samples(metadata = meta_disease,
+                    case = disease,
+                    control = "Healthy") |>
+      mutate(Disease = ifelse(Disease == disease, disease, "Control")) |>
+      select(DAid = DAid, Disease, Sex, Age, BMI)
+    
+    disease_healthy_data <-
+      data_disease |>
+      filter(DAid %in% disease_healthy_meta$DAid) |>
+      select(DAid, Assay, NPX) |>
+      pivot_wider(names_from = "Assay", values_from = "NPX")
+    
+    healthy_res <-
+      do_limma_disease(
+        data_wide = disease_healthy_data,
+        metadata = disease_healthy_meta,
+        disease = disease,
+        cutoff = 0.5,
+        controls = "Healthy",
+        correct = T
+      )
+    
+  })
+```
