@@ -896,10 +896,12 @@ ggplot(scatter_data, aes(x = NPX, y = Value)) +
 ggsave("results/selected_examples_scatterplots_all_assays.png", width = 12, height = 10)
 ```
 
+## Manuscript Figures
+
 ```{r}
 # Step 1: Filter selected examples
 selected_examples <- tibble::tibble(
-  Assay = c("FGR", "PTN", "PADI2", "TNFRSF8")
+  Assay = c("TWF2", "ECE1", "FGR", "PTN")
 )
 
 # Step 2: Prepare scatter data
@@ -941,6 +943,7 @@ for (i in seq_len(nrow(selected_examples))) {
   }
 }
 
+# Step 1: Prepare scatter data
 scatter_data <- bind_rows(scatter_data) |>
   mutate(Class = factor(Class, levels = class_order))
 
@@ -954,31 +957,7 @@ label_df <- scatter_data |>
   ) |>
   mutate(label = paste0("ρ = ", round(rho, 2)))
 
-# Step 3: Create the upper scatterplot
-upper_plot <- ggplot(scatter_data, aes(x = NPX, y = Value)) +
-  geom_point(aes(color = Class), alpha = 0.6) +
-  geom_smooth(method = "auto", se = TRUE, color = "black") +
-  geom_text(
-    data = label_df,
-    aes(x = -Inf, y = Inf, label = label),
-    hjust = -0.05, vjust = 1.2, size = 3
-  ) +
-  scale_color_manual(values = disease_class) +
-  facet_grid(Class ~ Assay, scales = "free") +
-  labs(x = "Olink (NPX)", y = "SomaScan (log2RFU)") +
-  theme_hd() +
-  theme(
-    legend.position = "None",
-    strip.text.x = element_text(size = 8),
-    strip.text.y = element_text(size = 8),
-    axis.text = element_text(size = 6),
-    axis.title = element_text(size = 8),
-    plot.margin = margin(t = 5, r = 5, b = 5, l = 5)
-  )
-upper_plot
-```
 
-```{r}
 correlation <- olink |>
   inner_join(soma, by = c("DAid", "Assay")) |>
   group_by(Assay, AptName) |>
@@ -1022,134 +1001,144 @@ combined_data <- bind_rows(soma_filtered, olink_filtered) |>
       pull(Disease) |> 
       unique())
   )
-
-# Step 5: Create the lower boxplot
-lower_plot <- ggplot(combined_data, aes(x = Disease, y = Value, fill = Class)) +
-  geom_boxplot(outlier.shape = NA, alpha = 1) +
-  #geom_jitter(position = position_jitterdodge(jitter.width = 0.2), size = 0.5, alpha = 0.6) +
-  facet_grid(Technology ~ Assay, scales = "free") +
-  labs(x = "Disease", y = "Olink (NPX) or SomaScan (log2RFU)") +
-  scale_fill_manual(values = disease_class) +
-  theme_hd() +
-  theme(
-    legend.position = "bottom",  # Position the legend at the bottom
-    legend.text = element_text(size = 6),  # Adjust legend text size
-    legend.title = element_text(size = 8),  # Adjust legend title size
-    legend.margin = margin(t = 2, r = 2, b = 2, l = 2),  # Adjust legend 
-    strip.text.x = element_text(size = 8),
-    strip.text.y = element_text(size = 8),
-    axis.text = element_text(size = 6),
-    axis.text.x = element_text(angle = 60, hjust = 1, vjust = 1),
-    axis.title = element_text(size = 8),
-    axis.title.x = element_blank(),
-    plot.margin = margin(t = 5, r = 5, b = 5, l = 5)
-  ) +
-  guides(
-    fill = guide_legend(nrow = 1)  # Force legend elements into a single row
-  )
-lower_plot
 ```
 
 ```{r}
-combined_plot <- upper_plot / lower_plot + plot_layout(heights = c(6, 2))
+thresholds <- tibble::tibble(
+  Assay = c("TWF2", "ECE1", "FGR", "PTN"),  # Replace with your protein names
+  Olink_min = c(NA, -2, NA, NA),  # Minimum y-axis values for Olink
+  Olink_max = c(NA, 3, NA, NA),  # Maximum y-axis values for Olink
+  SomaScan_min = c(NA, 8, 6, NA),  # Minimum y-axis values for SomaScan
+  SomaScan_max = c(NA, 12, 11, NA)  # Maximum y-axis values for SomaScan
+)
 
-combined_plot <- combined_plot +
-  theme(
-    plot.margin = margin(t = 5, r = 5, b = 5, l = 5)
-  )
+# Step 2: Loop through each protein and create pair-plots
+protein_plots <- list()
 
-ggsave("results/combined_plot_A4.png", combined_plot, width = 21, height = 29.7, units = "cm")
-```
+for (protein in unique(scatter_data$Assay)) {
+  # Filter data for the current protein
+  scatter_data_filtered <- scatter_data |> 
+    filter(Assay == protein)
+  label_df_filtered <- label_df |> 
+    filter(Assay == protein)
+  combined_data_filtered <- combined_data |> 
+    filter(Assay == protein)
+  
+  thresholds_current <- thresholds |> filter(Assay == protein)
 
-REVERSED
+  # Restrict data based on thresholds
+  combined_data_filtered <- combined_data_filtered |> 
+    filter(
+      (Technology == "Olink" & 
+       (is.na(thresholds_current$Olink_min) | Value >= thresholds_current$Olink_min) &
+       (is.na(thresholds_current$Olink_max) | Value <= thresholds_current$Olink_max)) |
+      (Technology == "SomaScan" & 
+       (is.na(thresholds_current$SomaScan_min) | Value >= thresholds_current$SomaScan_min) &
+       (is.na(thresholds_current$SomaScan_max) | Value <= thresholds_current$SomaScan_max))
+    )
 
-```{r}
-# Step 1: Identify the class with the best correlation for each Assay
-best_class_per_assay <- scatter_data |>
-  filter(Class != "Global") |>  # Exclude Global for this calculation
-  group_by(Assay) |>
-  summarise(
-    best_class = Class[which.max(rho)],  # Find the class with the highest correlation
-    .groups = "drop"
-  )
+  # Left scatterplot for the current protein
+  scatter_plot <- ggplot(scatter_data_filtered, aes(x = NPX, y = Value)) +
+    geom_point(aes(color = Class), alpha = 0.6, size = 0.5) +
+    geom_smooth(method = "auto", se = TRUE, color = "black") +
+    geom_text(
+      data = label_df_filtered,
+      aes(x = -Inf, y = Inf, label = label),
+      hjust = -0.05, vjust = 1.2, size = 3
+    ) +
+    scale_color_manual(values = disease_class) +
+    facet_wrap(~ Class, ncol = 4, scales = "free") +  # Use facet_wrap for protein-by-protein layout
+    labs(x = "Olink (NPX)", y = "SomaScan (log2RFU)") +
+    theme_hd() +
+    theme(
+      legend.position = "None",
+      strip.text = element_text(size = 8),
+      axis.text = element_text(size = 6),
+      axis.title = element_text(size = 8),
+      axis.text.x = element_text(hjust = 0.5),
+      plot.margin = margin(t = 5, r = 5, b = 5, l = 5)
+    )
 
-# Step 2: Filter scatter_data to include only Global and the best class per Assay
-filtered_scatter_data <- scatter_data |>
-  inner_join(best_class_per_assay, by = "Assay") |>  # Join to get the best class
-  filter(Class == "Global" | Class == best_class) |>  # Keep only Global and the best class
-  mutate(
-    Facet_Class = if_else(Class == "Global", "Global", "Best Class"),  # Create a new column for faceting
-    Facet_Class = factor(Facet_Class, levels = c("Global", "Best Class"))  # Ensure Global comes first
-  )
+  # Right boxplot for the current protein
+  boxplot <- ggplot(combined_data_filtered, aes(x = Disease, y = Value, fill = Class)) +
+    geom_boxplot(outlier.shape = NA, alpha = 1) +
+    geom_jitter(width = 0.1, alpha = 0.3, size = 0.1) +
+    facet_wrap(~ Technology, ncol = 1, scales = "free_y") +  # Use facet_wrap for technology-by-technology layout
+    labs(x = "Disease", y = "Olink (NPX) or SomaScan (log2RFU)") +
+    scale_fill_manual(values = disease_class) +
+    theme_hd() +
+    theme(
+      legend.position = "bottom",  # Position the legend at the bottom
+      legend.text = element_text(size = 6),  # Adjust legend text size
+      legend.title = element_text(size = 8),  # Adjust legend title size
+      legend.margin = margin(t = 2, r = 2, b = 2, l = 2),  # Adjust legend 
+      strip.text = element_text(size = 8),
+      axis.text = element_text(size = 6),
+      axis.text.x = element_text(angle = 60, hjust = 1, vjust = 1),
+      axis.title = element_text(size = 8),
+      axis.title.x = element_blank(),
+      plot.margin = margin(t = 5, r = 5, b = 5, l = 5)
+    ) +
+    guides(
+      fill = guide_legend(nrow = 1)  # Force legend elements into a single row
+    )
+  
+ # Combine scatterplot (left) and boxplot (right) side by side
+  pair_plot <- scatter_plot + boxplot
+  
+  # Step 2: Create annotation plot for the assay name
+  annotation_plot <- ggplot(data = tibble(Assay = protein), aes(y = Assay)) +
+    geom_text(aes(x = 1, label = Assay), hjust = 0.5, vjust = 0.5, size = 4, angle = 90, fontface = "bold") +  # Rotate text 90 degrees
+    theme_void() +
+    theme(
+      plot.margin = margin(t = 5, r = 5, b = 5, l = 5),
+      panel.background = element_rect(fill = "#E5E5E5", color = NA),  # Set light grey background
+      panel.border = element_rect(fill = NA, color = NA, size = 0.5)  # Keep black border
+    )
+  
+  # Combine annotation plot with pair-plot
+  combined_plot <- annotation_plot + pair_plot + plot_layout(widths = c(0.05, 2))
+  
+  # Add the combined plot to the list
+  protein_plots[[protein]] <- combined_plot
+}
 
-# Step 3: Update label_df to match the filtered scatter_data
-filtered_label_df <- label_df |>
-  inner_join(best_class_per_assay, by = "Assay") |>  # Join to get the best class
-  filter(Class == "Global" | Class == best_class) |>  # Keep only Global and the best class
-  mutate(
-    Facet_Class = if_else(Class == "Global", "Global", "Best Class"),  # Create a new column for faceting
-    Facet_Class = factor(Facet_Class, levels = c("Global", "Best Class"))  # Ensure Global comes first
-  )
+# Step 3: Modify plots to remove axis text and legends for all but the last plot
+for (i in seq_along(protein_plots)) {
+  if (i < length(protein_plots)) {
+    protein_plots[[i]][[2]][[2]] <- protein_plots[[i]][[2]][[2]] &
+      theme(
+        legend.position = "none",  # Remove legends for all but the last plot
+        axis.text.x = element_blank(),  # Remove x-axis text for boxplots
+        axis.ticks.x = element_blank(),  # Remove x-axis ticks for boxplots
+      )
+    protein_plots[[i]][[2]][[1]] <- protein_plots[[i]][[2]][[1]] &
+      theme(
+        axis.title.x = element_blank()  
+      )
+  } else {
+    protein_plots[[i]][[2]][[2]] <- protein_plots[[i]][[2]][[2]] &
+      theme(
+        legend.position = "none",  # Keep legend only for the last plot
+        axis.text.x = element_blank(),  # Remove x-axis text for the top boxplot (Olink)
+        axis.ticks.x = element_blank()  # Remove x-axis ticks for the top boxplot (Olink)
+      ) +
+      theme(
+        axis.text.x = element_text(angle = 60, hjust = 1, vjust = 1),  # Keep x-axis text for the bottom boxplot (SomaScan)
+        axis.ticks.x = element_line()  # Keep x-axis ticks for the bottom boxplot (SomaScan)
+      )
+  }
+}
 
-# Step 4: Create the updated upper plot
-upper_plot_r <- ggplot(filtered_scatter_data, aes(x = NPX, y = Value)) +
-  geom_point(aes(color = Class), alpha = 0.6) +  # Color by original class
-  geom_smooth(method = "auto", se = TRUE, color = "black") +
-  geom_text(
-    data = filtered_label_df,
-    aes(x = -Inf, y = Inf, label = label),
-    hjust = -0.05, vjust = 1.2, size = 3
-  ) +
-  scale_color_manual(values = disease_class) +  # Use the original class colors
-  facet_grid(Assay ~ Facet_Class, scales = "free") +  # Facet by Global and Best Class
-  labs(x = "Olink (NPX)", y = "SomaScan (log2RFU)") +
-  theme_hd() +
-  theme(
-    legend.position = "None",
-    strip.text.x = element_text(size = 8),
-    strip.text.y = element_blank(),  # Remove row facet labels
-    strip.background.y = element_blank(),
-    axis.text = element_text(size = 6),
-    axis.title = element_text(size = 8),
-    plot.margin = margin(t = 5, r = 5, b = 5, l = 5)
-  )
+# Step 4: Combine all pair-plots vertically
+final_plot <- wrap_plots(protein_plots, ncol = 1)  # Stack all pair-plots vertically
 
-# Display the plot
-upper_plot_r
-```
-
-```{r}
-# Step 5: Create the lower boxplot
-lower_plot_r <- ggplot(combined_data, aes(y = Disease, x = Value, fill = Class)) +
-  geom_boxplot(outlier.shape = NA, alpha = 1) +
-  #geom_jitter(position = position_jitterdodge(jitter.width = 0.2), size = 0.5, alpha = 0.6) +
-  facet_grid(Assay ~ Technology, scales = "free") +
-  labs(x = "Disease", y = "Value") +
-  scale_fill_manual(values = disease_class) +
-  theme_hd() +
-  theme(
-    legend.position = "none",  # Position the legend at the bottom
-    legend.text = element_text(size = 6),  # Adjust legend text size
-    legend.title = element_text(size = 8),  # Adjust legend title size
-    legend.margin = margin(t = 2, r = 2, b = 2, l = 2),  # Adjust legend 
-    strip.text.x = element_text(size = 8),
-    strip.text.y = element_text(size = 8),
-    axis.text = element_text(size = 6),
-    #axis.text.x = element_text(angle = 60, hjust = 1, vjust = 1),
-    axis.title = element_text(size = 8),
-    axis.title.x = element_blank(),
-    plot.margin = margin(t = 5, r = 5, b = 5, l = 5)
-  )
-lower_plot_r
-```
-
-```{r}
-combined_plot <- upper_plot_r + lower_plot_r + plot_layout(widths = c(5, 5))
-
-combined_plot <- combined_plot +
-  theme(
-    plot.margin = margin(t = 5, r = 5, b = 5, l = 5)
-  )
-
-ggsave("results/combined_plot_A4_r_sub.png", combined_plot, width = 21, height = 29.7, units = "cm")
+# Step 5: Save the final combined plot
+ggsave(
+  filename = "results/combined_pair_plots_A4_filt.png",
+  plot = final_plot,
+  width = 21,
+  height = 29.7,  # Adjust height based on the number of proteins
+  units = "cm"
+)
 ```
