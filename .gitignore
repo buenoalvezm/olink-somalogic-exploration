@@ -4,6 +4,7 @@
 .Ruserdata
 /doc
 /data
+/data_
 /results
 /output_reports
 .DS_store
