@@ -350,6 +350,8 @@ de_diseases <-
 
 write_tsv(de_diseases, "data/processed/de_diseases_olink_soma.tsv") # long format, combined
 
+de_diseases <- read_tsv("data/processed/de_diseases_olink_soma.tsv") # long format, combined
+
 
 # Overlapping - wide format
 de_diseases_overlapping <- 
@@ -365,6 +367,13 @@ de_diseases_overlapping <-
     arrange(Disease, Assay)
 
 write_tsv(de_diseases_overlapping, "data/processed/de_diseases_olink_soma_overlapping.tsv") # wide format, overlapping
+
+de_diseases_overlapping <- read_tsv("data/processed/de_diseases_olink_soma_overlapping.tsv") # wide format, overlapping
+
+
+
+de_diseases_overlapping
+
 ```
 
 
@@ -442,4 +451,175 @@ de_healthy <-
       )
     
   })
+```
+
+# Replicate plots
+
+
+```{r}
+de_diseases |> distinct(Control)
+```
+## Overlap
+
+```{r}
+de_diseases |>
+    rename(Significance = sig) |> 
+  filter(Control  == "All other diseases") |>
+  filter(Significance != "not significant") |>
+  left_join(meta_disease |>
+              distinct(Disease, Class), by = "Disease") |>
+              distinct(Disease, Class, Assay, Platform) |> 
+  group_by(Platform, Class) |>
+  count(Assay) |>
+  rename(n_assays = n) |>
+  count(n_assays) |>
+  mutate(n_assays = factor(n_assays)) |>
+  ggplot(aes(n_assays, n, fill = Class)) +
+  geom_col(show.legend = F) +
+  scale_fill_manual(values = pal_class) +
+  facet_grid(Platform ~ Class, scale = "free_x", space = "free_x") +
+  theme_hpa() +
+  ylab("Number of proteins") +
+  xlab("Number of diseases")
+
+ggsave(
+  savepath( "markers_class.png"),
+  height = 8,
+  width = 12
+)
+
+
+de_diseases |>
+    rename(Significance = sig) |> 
+  filter(Control  == "All other diseases",
+  Platform == "Olink") |>
+  filter(Significance != "not significant") |>
+  left_join(meta_disease |>
+              distinct(Disease, Class), by = "Disease") |>
+              distinct(Disease, Class, Assay, Platform) |> 
+  group_by(Platform, Class) |>
+  count(Assay) |>
+  rename(n_assays = n)  |> ungroup()  |> group_by(Platform, Class)  |>  filter(Class == "Metabolic")|> arrange(-n_assays) |> filter(grepl("MUC", Assay))
+```
+
+## Network
+
+```{r}
+differential_expression <-
+  de_diseases |>
+  filter(Control == "All other diseases",
+Platform == "Olink",
+         sig == "significant up") |>
+  select(proteins = Assay,
+         disease = Disease)
+
+overlap_diseases <-
+  expand_grid(
+    disease1 = unique(differential_expression$disease),
+    disease2 = unique(differential_expression$disease)
+  )   |>
+  filter(disease1 != disease2) |>
+  group_by_all() |>
+  do({
+    d1 <- .$disease1
+    d2 <- .$disease2
+    
+    disease1 <-
+      differential_expression |>
+      filter(disease == d1) |>
+      pull(proteins)
+    
+    disease2 <-
+      differential_expression |>
+      filter(disease == d2) |>
+      pull(proteins)
+    
+    ov <- length(intersect(disease1, disease2))
+    
+    tibble(disease1 = d1,
+           disease2 = d2,
+           overlap = ov)
+    
+  })
+
+filtered_overlap <-
+  overlap_diseases |>
+  group_by(disease1) |>
+  top_n(3, overlap) |>
+  ungroup() |>
+  filter(overlap > 150)
+
+graph <-
+  as_tbl_graph(filtered_overlap, directed = FALSE) |>
+  activate(nodes) |>
+  left_join(meta_disease |>
+              select(name = Disease, Class) |>
+              distinct(), by = "name")
+
+ggraph(graph, layout = "stress") +
+  geom_edge_link(aes(width = overlap), color = "grey") +
+  geom_node_point(aes(color = Class), size = 10) +
+  geom_node_text(aes(label = name), repel = TRUE) +
+  scale_color_manual(values = pal_class) +
+  theme_void()
+
+ggsave(
+  savepath( "Network_de_overlap_olink.png"),
+  h = 8,
+  w = 8
+)
+```
+
+## Pleiotropy
+
+
+```{r}
+# Extract differential expression results
+dat_overall <-
+  de_diseases |>
+  filter(Control  == "All other diseases") |>
+  filter(sig != "not significant",
+  Platform == "SomaScan") |>
+  count(AptName, Assay)
+
+# Select top proteins
+examples <-
+  dat_overall |>
+  arrange(-n) |>
+  head(35) |> distinct(Assay)
+
+# Compute the top of the stacked bars for each assay
+barplot_data <-
+  de_diseases |>
+  filter(
+    Control  == "All other diseases",
+    Platform == "Olink",
+    sig != "not significant",
+    Assay %in% examples$Assay
+  ) |>
+  left_join(meta_disease |>
+              distinct(Disease, Class), by = "Disease") |>
+  group_by(Assay) |>
+  count(Class)
+
+barplot_totals <-
+  barplot_data |>
+  group_by(Assay) |>
+  summarize(y_position = sum(n))
+
+plot_pleiotropy <-
+  barplot_data |>
+  mutate(Assay = factor(Assay, levels = rev(examples$Assay))) |>
+  ggplot(aes(Assay, n, fill = Class)) +
+  geom_col(show.legend = F) +
+  coord_flip() +
+  scale_fill_manual(values = pal_class) +
+  theme_hpa(angled = T) +
+  xlab("")
+
+ggsave(
+  savepath("general_disease_markers_olink.png"),
+  height = 9,
+  width = 4
+)
 ```
