@@ -1,8 +1,9 @@
 ---
-title: "Untitled"
+title: "Study overview: samples and assay coverage"
+author: "María Bueno Álvez"
+date: Sys.Date()
 format: html
 ---
-
 
 # Set up
 
