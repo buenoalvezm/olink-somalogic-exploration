@@ -287,6 +287,9 @@ ggsave("results/Manuscript-figures/Fig1e_secretome.pdf",
 umap_olink <- do_umap(data_olink,
                         wide = F,
                         impute = T)
+
+saveRDS(umap_olink, "data/processed/umap_olink.rds")
+
 p1 <- 
   umap_olink |>
   left_join(meta, by = c("Sample" = "DAid")) |>
@@ -299,6 +302,9 @@ p1 <-
 umap_soma <- do_umap(data_soma_wide,
                         wide = T,
                         impute = T)
+
+saveRDS(umap_soma, "data/processed/umap_soma.rds")
+
 p2 <- 
   umap_soma |>
   left_join(meta, by = c("Sample" = "DAid")) |>
