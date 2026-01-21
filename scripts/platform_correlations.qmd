@@ -119,11 +119,99 @@ soma <- soma |> filter(DAid %in% common_daids, Assay %in% common_assays)
 meta <- sample_meta |> filter(DAid %in% common_daids)
 ```
 
+## Olink-MS Correlation vs Olink-Soma correlation (just to check)
+
+```{r}
+correlation <- olink |>
+  inner_join(soma, by = c("DAid", "Assay")) |>
+  group_by(Assay, AptName) |>
+  summarise(
+    correlation = if (sum(is.finite(NPX) & is.finite(Value)) > 1)
+      suppressWarnings(cor(NPX, Value, method = "spearman", use = "complete.obs"))
+    else
+      NA_real_,
+    .groups = "drop"
+  ) |> 
+  group_by(Assay) |>
+  slice_max(order_by = correlation, n = 1, with_ties = FALSE) |>
+  ungroup() |> 
+  select(Assay, correlation)
+
+olink_ms <- read_csv("data/MS-Olink_protein_cor_table.csv") |> 
+  select(Assay, correlation = Correlation_Spearman)
+
+common_assays <- intersect(correlation$Assay, olink_ms$Assay)
+
+scatter_df <- correlation |>
+  filter(Assay %in% common_assays) |>
+  left_join(olink_ms, by = "Assay", suffix = c("_somascan", "_msolink"))
+
+n_assays <- nrow(scatter_df)
+
+ggplot(scatter_df, aes(x = correlation_somascan, y = correlation_msolink)) +
+  geom_point(size = 1, alpha = 0.7) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  xlim(-0.5, 1) +
+  ylim(-0.5, 1) +
+  annotate(
+    "text",
+    x = -0.48, y = 0.98,
+    label = paste0("n = ", n_assays),
+    hjust = 0, vjust = 1, size = 3
+  ) +
+  labs(
+    x = "Olink–SomaScan correlation",
+    y = "MS–Olink correlation"
+  ) +
+  theme_hd()
+
+keep_samples <- meta |> filter(Disease %in% c("Healthy", "Lung cancer")) |> pull(DAid) |> unique()
+
+correlation_keepsamples <- olink |>
+  inner_join(soma, by = c("DAid", "Assay")) |>
+  filter(DAid %in% keep_samples) |>
+  group_by(Assay, AptName) |>
+  summarise(
+    correlation = if (sum(is.finite(NPX) & is.finite(Value)) > 1)
+      suppressWarnings(cor(NPX, Value, method = "spearman", use = "complete.obs"))
+    else
+      NA_real_,
+    .groups = "drop"
+  ) |> 
+  group_by(Assay) |>
+  slice_max(order_by = correlation, n = 1, with_ties = FALSE) |>
+  ungroup() |> 
+  select(Assay, correlation)
+
+scatter_df <- correlation_keepsamples |>
+  filter(Assay %in% common_assays) |>
+  left_join(olink_ms, by = "Assay", suffix = c("_somascan", "_msolink"))
+
+n_assays <- nrow(scatter_df)
+
+ggplot(scatter_df, aes(x = correlation_somascan, y = correlation_msolink)) +
+  geom_point(size = 1, alpha = 0.7) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  xlim(-0.5, 1) +
+  ylim(-0.5, 1) +
+  annotate(
+    "text",
+    x = -0.48, y = 0.98,
+    label = paste0("n = ", n_assays),
+    hjust = 0, vjust = 1, size = 3
+  ) +
+  labs(
+    x = "Olink–SomaScan correlation",
+    y = "MS–Olink correlation"
+  ) +
+  theme_hd()
+```
+
 ## Correlations Figure
 
 ### Global and per Disease Correlations
 
-Global correlation (top-right)
+Global correlation (top-left)
 
 ```{r}
 correlation <- olink |>
@@ -203,7 +291,7 @@ rescued_proteins_plot <- ggplot(rescue_results_disease, aes(x = reorder(Disease,
   geom_bar(aes(fill = Class), stat = "identity", color = "black") +
   scale_fill_manual(values = disease_class) +
   labs(
-    title = "'Rescued' Proteins per Disease",
+    title = "Context-dependent Concordant Proteins",
     x = "Disease"
   ) +
   theme_hd() +
@@ -225,7 +313,7 @@ rescued_proteins_plot <- ggplot(rescue_results_disease, aes(x = reorder(Disease,
   guides(fill = guide_legend(nrow = 1, byrow = TRUE))
 ```
 
-Calculate maximum correlation per protein across Diseases and plot distribution. Max correlation (top-left)
+Calculate maximum correlation per protein across Diseases and plot distribution. Max correlation (top-right)
 
 ```{r}
 max_correlation <- correlation_by_disease |>
