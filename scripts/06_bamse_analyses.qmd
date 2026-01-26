@@ -1,0 +1,682 @@
+---
+title: "BAMSE analyses"
+format: html
+---
+
+# Setup
+
+```{r}
+library(tidyverse)
+library(HDAnalyzeR)
+library(mbaRtools)
+library(embed)
+library(patchwork)
+library(ggbeeswarm)
+library(pheatmap)
+library(ggplotify)
+library(ggrepel)
+
+# Data
+data_soma_wide <- read_tsv("../../Data/Somascan/processed/data_phase2_somalogic_curated_subset_20251031.tsv")
+data_olink <- read_tsv("../../Data/Olink/processed/data_phase2_HT_bridged_curated_subset_20251031.tsv")
+meta_soma <- read_tsv("../../Data/Somascan/processed/meta_phase2_somalogic_elod_20251028.tsv")
+meta <- read_tsv("../../Data/metadata/meta_phase2_hpav25_20251031.tsv")
+meta_bamse <- read_tsv("../../Data/metadata/bamse_meta_ht_phase2.tsv")
+
+# Soma data in long format
+data_soma <- 
+  data_soma_wide |> 
+  pivot_longer(names_to = "AptName", values_to = "log2RFU", cols = -DAid) |> 
+  left_join(meta_soma |> 
+    select(AptName, Assay = EntrezGeneSymbol), by = "AptName")
+
+data_bamse_soma <- 
+  data_soma |> 
+  filter(DAid %in% meta_bamse$DAid)
+
+data_bamse_olink <- 
+  data_olink |> 
+  filter(DAid %in% meta_bamse$DAid)
+```
+
+## Best correlating aptamer per assay
+
+```{r}
+protein_corr <- 
+  read_tsv("data/processed/platform_corr_summary_maria.tsv") |> 
+  select(Assay,AptName,Global_corr)
+
+best_aptamer <- 
+  protein_corr |> 
+  group_by(Assay) |> 
+  slice_max(abs(Global_corr), n = 1, with_ties = FALSE) |> 
+  ungroup()
+```
+
+# PCA
+
+```{r}
+# Olink
+pca_bamse_olink <-
+  do_pca(data = data_bamse_olink,
+          wide = F,
+          plots = F)
+
+# SomaScan
+pca_bamse_soma <-
+  do_pca(data = data_bamse_soma |> select(-Assay) |> rename(Assay = AptName, NPX = log2RFU),
+          wide = F,
+          plots = F)
+
+# Plot
+plot_pca_olink <-
+  pca_bamse_olink$pca_res |>
+  left_join(meta_bamse, by = c("Sample" = "DAid")) |>
+  mutate(Visit = factor(Visit)) |>
+  ggplot(aes(PC1, PC2, color = Visit, fill = Visit)) +
+  geom_point(alpha = 0.7) +
+  stat_ellipse(geom = "polygon",
+               alpha = 0.3,
+               color = NA) +
+  scale_color_hpa("bamse_pal") +
+  scale_fill_hpa("bamse_pal") +
+  theme_hpa() +
+  theme(legend.position = "top")
+
+plot_pca_soma <-
+  pca_bamse_soma$pca_res |>
+  left_join(meta_bamse, by = c("Sample" = "DAid")) |>
+  mutate(Visit = factor(Visit)) |>
+  ggplot(aes(PC1, PC2, color = Visit, fill = Visit)) +
+  geom_point(alpha = 0.7, show.legend = F) +
+  stat_ellipse(geom = "polygon",
+               alpha = 0.3,
+               color = NA,
+               show.legend = F) +
+  scale_color_hpa("bamse_pal") +
+  scale_fill_hpa("bamse_pal") +
+  theme_hpa() 
+
+pcas <- plot_pca_olink + plot_pca_soma
+
+
+# ggsave("results/Manuscript-figures/BAMSE_PCA.pdf",
+#   h = 5,
+#   w = 10
+# )
+```
+
+
+# Mixed-effects models
+
+```{r}
+# MM
+data_mm <-
+  data_bamse |>
+  pivot_longer(names_to = "Assay", values_to = "NPX", cols = -DAid) |> 
+  select(DAid, Assay, NPX) %>%
+  left_join(meta_bamse, by = "DAid") |>
+  mutate(Sex = as.factor(Sex),
+         Age = as.factor(Age),
+         Subject = as.factor(Subject))
+
+# Run mixed effect models on all proteins extracting the fixed effects
+fixed_effects <-
+  map_df(unique(data_mm$Assay), function(protein) {
+    do_mixed_effect_model(df = data_mm,
+                          type = "fixed_effects",
+                          protein = protein)
+    
+  })
+
+#saveRDS(fixed_effects, "data/processed/mm_fixed_effects_bamse_soma.rds")
+# Run mixed effect models on all proteins extracting the variance explained
+variance_explained <-
+  map_df(unique(data_mm$Assay), function(protein) {
+    do_mixed_effect_model(df = data_mm,
+                          type = "variance_explained",
+                          protein = protein)
+  })
+
+#saveRDS(variance_explained, "data/processed/mm_variance_explained_bamse_soma.rds")
+
+#fixed_effects_soma <- readRDS("data/processed/mm_fixed_effects_bamse_soma.rds")
+#variance_explained_soma <- readRDS("data/processed/mm_variance_explained_bamse_soma.rds")
+```
+
+
+## Age effect
+
+```{r}
+# P-value adjustment
+dat_age_soma <-
+  fixed_effects_soma |>
+  filter(term == "Age") |>
+  mutate(p.value = p.adjust(p.value, method = "BH")) |>
+  arrange(p.value) |>
+  mutate(
+    sig = case_when(
+      p.value < 0.06 & estimate > 0 ~ "significant up",
+      p.value < 0.06 &
+        estimate < 0 ~ "significant down",
+      TRUE ~ "not significant"
+    )
+  )
+
+# Select top proteins
+top_age_proteins_soma <-
+  dat_age_soma |>
+  group_by(sig) |>
+  top_n(n = 3, wt = -log10(p.value)) |>
+  filter(sig != "not significant") |> 
+    left_join(meta_soma, by = c("Assay" = "AptName")) |> 
+  rename(AptName = Assay, Assay = Target) 
+
+top_age_proteins_soma |> 
+    distinct(EntrezGeneSymbol) |> 
+    filter(EntrezGeneSymbol %in% data_olink$Assay)
+
+
+boxplots_age <-
+  data_bamse_soma |>
+  filter(AptName %in% top_age_proteins_soma$AptName) |>
+  left_join(meta_bamse |>
+              select(DAid, Subject, Visit)) |>
+  mutate(AptName = factor(AptName, levels = top_age_proteins_soma$AptName),
+        Assay = factor(Assay, levels = top_age_proteins_soma$EntrezGeneSymbol),
+         Visit = factor(Visit)) |>
+  ggplot(aes(Visit, log2RFU, color = Visit)) +
+  geom_line(aes(group = Subject),
+            alpha = 0.3,
+            color = "grey80") +
+  geom_quasirandom(alpha = 0.7) +
+  geom_boxplot(fill = NA,
+               outlier.colour = NA,
+               color = "grey20") +
+  scale_color_hpa(palette = "bamse_pal") +
+  facet_wrap( ~ Assay, scales = "free_y", nrow = 1) +
+  theme_hpa() +
+  theme(
+    legend.position = "top",
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank()
+  )
+
+# volcano_plot_age + boxplots_age
+
+# ggsave(
+#   savepath_results("Manuscript-figures", "Fig2c_Fig2d_v2.pdf"),
+#   h = 5,
+#   w = 12
+# )
+```
+
+## Import Olink results
+
+```{r}
+fixed_effects_olink <- readRDS("data/processed/MM_estimates_BAMSE_v2.rds")
+
+
+dat_age_olink <-
+  fixed_effects_olink |>
+  filter(term == "Age") |>
+  mutate(p.value = p.adjust(p.value, method = "BH")) |>
+  arrange(p.value) |>
+  mutate(
+    sig = case_when(
+      p.value < 0.06 & estimate > 0 ~ "significant up",
+      p.value < 0.06 &
+        estimate < 0 ~ "significant down",
+      TRUE ~ "not significant"
+    )
+  )
+```
+
+
+## Volcanos
+
+```{r}
+# SomaScan
+labels_age_soma <-
+  dat_age_soma |>
+  left_join(meta_soma, by = c("Assay" = "AptName")) |> 
+  rename(AptName = Assay, Assay = Target) |> 
+  group_by(sig) |>
+  top_n(n = 3, wt = -log10(p.value)) |>
+  filter(sig != "not significant") |> 
+  relocate(Assay)
+
+volcano_plot_age_soma <-
+  dat_age_soma |>
+  ggplot(aes(
+    x = estimate,
+    y = -log10(p.value),
+    color = sig,
+    label = Assay
+  )) +
+  geom_point(size = 1, alpha = 0.4) +
+  geom_text_repel(data = labels_age_soma,
+                  size = 2,
+                  show.legend = F) +
+  geom_hline(
+    yintercept = -log10(0.05),
+    linetype = 'dashed',
+    color = "darkgrey"
+  ) +
+  scale_color_hpa(palette = "de_pal") +
+  theme_hpa() +
+  theme(axis.text = element_text(size = 8),
+        legend.position = "top") 
+
+
+# Olink
+labels_age_olink <-
+  dat_age_olink |>
+  group_by(sig) |>
+  top_n(n = 3, wt = -log10(p.value)) |>
+  filter(sig != "not significant") |> 
+  relocate(Assay)
+
+volcano_plot_age_olink <-
+  dat_age_olink |>
+  ggplot(aes(
+    x = estimate,
+    y = -log10(p.value),
+    color = sig,
+    label = Assay
+  )) +
+  geom_point(size = 1, alpha = 0.4) +
+  geom_text_repel(data = labels_age_olink,
+                  size = 2,
+                  show.legend = F) +
+  geom_hline(
+    yintercept = -log10(0.05),
+    linetype = 'dashed',
+    color = "darkgrey"
+  ) +
+  scale_color_hpa(palette = "de_pal") +
+  theme_hpa() +
+  theme(axis.text = element_text(size = 8),
+        legend.position = "none") 
+
+# volcanos <- volcano_plot_age_olink + volcano_plot_age_soma
+# ggsave("results/Manuscript-figures/BAMSE_volcanos.pdf",
+#   h = 4,
+#   w = 8
+# )
+
+# Save combined PCAs / volcanos 
+ggsave("results/Manuscript-figures/BAMSE_PCA_volcanos.pdf",
+  h = 10,
+  w = 10
+)
+```
+
+## Extent proteome
+
+```{r}
+# Calculate percentage bar
+bar_df <- bind_rows(
+  dat_age_olink |> 
+    count(sig) |> 
+    mutate(platform = "Olink"),
+
+  dat_age_soma |> 
+    count(sig) |> 
+    mutate(platform = "Somalogic")
+) |>
+  group_by(platform) |>
+  mutate(
+    prop = n / sum(n),
+    label = scales::percent(prop, accuracy = 1)
+  ) |>
+  ungroup()
+
+# Generate plots
+prop_olink <- 
+    bar_df |> 
+    filter(platform == "Olink") |> 
+    ggplot(aes(x = platform, y = prop, fill = sig)) +
+  geom_col(width = 0.6, color = "white", show.legend = F) +
+  geom_text(
+    aes(label = label),
+    color = "white",
+    position = position_stack(vjust = 0.5),
+    size = 3
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_hpa(axis_y = F) +
+  labs(
+    x = NULL,
+    y = "Proportion of proteome",
+    fill = NULL
+  ) +
+scale_fill_hpa(palette = "de_pal") +
+coord_flip()
+
+
+prop_soma <- 
+    bar_df |> 
+    filter(platform == "Somalogic") |> 
+    ggplot(aes(x = platform, y = prop, fill = sig)) +
+  geom_col(width = 0.6, color = "white", show.legend = F) +
+  geom_text(
+    aes(label = label),
+    color = "white",
+    position = position_stack(vjust = 0.5),
+    size = 3
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_hpa(axis_y = F) +
+  labs(
+    x = NULL,
+    y = "Proportion of proteome",
+    fill = NULL
+  ) +
+scale_fill_hpa(palette = "de_pal") +
+coord_flip()
+
+prop_olink + prop_soma
+ggsave("results/Manuscript-figures/prop_olink_soma_de.pdf", h =2, w = 8)
+
+```
+
+# Examples
+
+```{r}
+top_age_proteins_soma <-
+  dat_age_soma |>
+  group_by(sig) |>
+  top_n(n = 3, wt = -log10(p.value)) |>
+  filter(sig != "not significant") |> 
+    left_join(meta_soma, by = c("Assay" = "AptName")) |> 
+  rename(AptName = Assay, Assay = EntrezGeneSymbol) 
+
+top_age_proteins_olink <-
+  dat_age_olink |>
+  group_by(sig) |>
+  top_n(n = 3, wt = -log10(p.value)) |>
+  filter(sig != "not significant",
+  Assay %in% overlapping_proteins) 
+
+
+example_prots <- 
+    top_age_proteins_soma |> 
+    mutate(rank = rank(log10(p.value))) |> 
+    select(Assay, AptName, sig, rank) |> 
+    mutate(Platform = "SomaScan") |> 
+    bind_rows(top_age_proteins_olink |> 
+    mutate(rank = rank(log10(p.value))) |> 
+    select(Assay, sig, rank) |> 
+    left_join(best_aptamer |> select(-Global_corr), by = "Assay") |> 
+    mutate(Platform = "Olink")) |> 
+    mutate(Platform = factor(Platform)) |> 
+    arrange(Platform, sig, rank) |> 
+    group_by(Assay) |> 
+    slice(1) |> 
+    arrange(sig, Platform, rank) |> 
+    filter(Assay %in% overlapping_proteins)
+
+example_prots |> 
+    left_join(dat |> 
+    distinct(Assay, Significance))
+
+plot_examples_soma <- 
+    data_bamse_soma |>
+  filter(AptName %in% example_prots$AptName) |>
+  left_join(meta_bamse |>
+              select(DAid, Subject, Visit)) |>
+  mutate(AptName = factor(AptName, levels = rev(example_prots$AptName)),
+        Assay = factor(Assay, levels = rev(example_prots$Assay)),
+         Visit = factor(Visit)) |>
+  ggplot(aes(Visit, log2RFU, color = Visit)) +
+  geom_line(aes(group = Subject),
+            alpha = 0.3,
+            color = "grey80") +
+  geom_quasirandom(alpha = 0.7, show.legend = F) +
+  geom_boxplot(fill = NA,
+               outlier.colour = NA,
+               color = "grey20") +
+  scale_color_hpa(palette = "bamse_pal") +
+  facet_wrap( ~Assay , scales = "free_x", nrow = 1) +
+  theme_hpa() +
+  coord_flip() +
+  theme(
+    legend.position = "top",
+    axis.ticks.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_text(angle = -90, vjust = 0.5)
+  )
+
+plot_examples_olink <- 
+    data_bamse_olink |>
+  filter(Assay %in% example_prots$Assay) |>
+  left_join(meta_bamse |>
+              select(DAid, Subject, Visit)) |>
+  mutate(Assay = factor(Assay, levels = rev(example_prots$Assay)),
+         Visit = factor(Visit)) |>
+  ggplot(aes(Visit, NPX, color = Visit)) +
+  geom_line(aes(group = Subject),
+            alpha = 0.3,
+            color = "grey80") +
+  geom_quasirandom(alpha = 0.7, show.legend =  F) +
+  geom_boxplot(fill = NA,
+               outlier.colour = NA,
+               color = "grey20") +
+  scale_color_hpa(palette = "bamse_pal") +
+  facet_wrap( ~Assay , scales = "free_x", nrow = 1) +
+  theme_hpa(facet_title = F) +
+  coord_flip() +
+  theme(
+    legend.position = "top",
+    axis.ticks.y = element_blank(),
+    axis.text.y = element_blank(),
+    axis.text.x = element_text(angle = -90, vjust = 0.5)
+  )
+
+
+plot_examples_soma /plot_examples_olink 
+ggsave("results/Manuscript-figures/examples_bamse.pdf", h = 6, w = 14)
+
+# # DE olink, DE soma, Cor BAMSE, Cor Global
+# plot_examples_soma <- 
+#     top_age_proteins_soma |> 
+#     distinct(EntrezGeneSymbol) |> 
+#     filter(EntrezGeneSymbol %in% data_olink$Assay)
+#   left_join(meta_bamse |>
+#               select(DAid, Subject, Visit)) |>
+#   mutate(AptName = factor(AptName, levels = top_age_proteins_soma$AptName),
+#         Assay = factor(Assay, levels = top_age_proteins_soma$EntrezGeneSymbol),
+#          Visit = factor(Visit)) |>
+#   ggplot(aes(Visit, log2RFU, color = Visit)) +
+#   geom_line(aes(group = Subject),
+#             alpha = 0.3,
+#             color = "grey80") +
+#   geom_quasirandom(alpha = 0.7) +
+#   geom_boxplot(fill = NA,
+#                outlier.colour = NA,
+#                color = "grey20") +
+#   scale_color_hpa(palette = "bamse_pal") +
+#   facet_wrap( ~ Assay, scales = "free_y", nrow = 1) +
+#   theme_hpa() +
+#   theme(
+#     legend.position = "top",
+#     axis.ticks.x = element_blank(),
+#     axis.text.x = element_blank()
+#   )
+```
+
+
+
+# Comparison
+
+```{r}
+# Select overlapping proteins
+overlapping_proteins <- 
+  data_olink |> 
+  distinct(Assay) |> 
+  filter(Assay %in% meta_soma$EntrezGeneSymbol) |> 
+  pull(Assay)
+
+# Add significance label
+dat <- 
+  fixed_effects_soma |> 
+  rename(AptName = Assay) |> 
+  left_join(meta_soma, by = "AptName") |> 
+  filter(term == "Age") |> 
+  select(Assay = EntrezGeneSymbol, term, pval_soma = p.value) |> 
+  filter(Assay %in% overlapping_proteins) |> 
+  left_join(fixed_effects_olink |> 
+    filter(term == "Age",
+  Assay %in% overlapping_proteins) |> 
+  select(Assay, term, pval_olink = p.value)) |> 
+    mutate(Significance = case_when(pval_olink < 0.05 & pval_soma < 0.05 ~ "Significant in both",
+pval_olink < 0.05 & pval_soma > 0.05 ~ "Significant in Olink",
+pval_olink > 0.05 & pval_soma < 0.05 ~ "Significant in Somalogic",
+pval_olink > 0.05 & pval_soma > 0.05 ~ "Not significant in both")) 
+```
+
+## Scatterplot
+
+```{r}
+dat2 <- dat |>
+  mutate(
+    x = -log10(pval_soma),
+    y = -log10(pval_olink)
+  )
+  
+labels_df <- bind_rows(
+  dat2 |>
+    filter(Significance == "Significant in both") |>
+    arrange(desc(x + y)) |>
+    slice_head(n = 10),
+
+  dat2 |>
+    filter(Significance == "Significant in Olink") |>
+    arrange(desc(y)) |>
+    slice_head(n = 3),
+
+  dat2 |>
+    filter(Significance == "Significant in Somalogic") |>
+    arrange(desc(x)) |>
+    slice_head(n = 3)
+)
+
+# Generate comparison plot
+dat2 |>
+  filter(!is.na(Significance)) |>
+  ggplot(aes(-log10(pval_soma), -log10(pval_olink), color = Significance)) +
+  geom_point() +
+  geom_text_repel(
+    data = labels_df,
+    aes(label = Assay),
+    show.legend = FALSE,
+    max.overlaps = Inf
+  ) +
+  scale_color_manual(values = de_platform_pal) +
+  coord_equal() + 
+  theme_hpa()
+
+
+ggsave("results/Manuscript-figures/comparison_bamse.pdf", h = 7, w = 7)
+```
+
+## Pie chart
+
+```{r}
+dat |>
+  filter(!is.na(Significance)) |>
+  count(Significance) |>
+  mutate(
+    perc = n / sum(n),
+    label = scales::percent(perc, accuracy = 1)
+  ) |>
+  ggplot(aes(x = "", y = n, fill = Significance)) +
+  geom_col(width = 1, color = "white", show.legend = F) +
+  geom_text(
+    aes(label = label),
+    position = position_stack(vjust = 0.5),
+    size = 8,
+    color = "white",
+    show.legend = F
+  ) +
+  coord_polar(theta = "y") +
+  scale_fill_manual(values = de_platform_pal) +
+  theme_void() +
+  theme(
+    legend.title = element_blank()
+  )
+
+ggsave("results/Manuscript-figures/pie-comparison.pdf", h = 5, w = 5) 
+```
+
+## Functional groups
+
+```{r}
+
+```
+
+# Examples
+
+
+```{r}
+proteins <- c("CCN5", "NELL2")
+
+plot_olink_soma <- 
+  function(protein) {
+
+  plot_olink <- 
+data_bamse_olink |>
+  filter(Assay %in% protein) |>
+  left_join(meta_bamse |>
+              select(DAid, Subject, Visit)) |>
+  mutate(        Assay = factor(Assay, levels = rev(protein)),
+  Visit = factor(Visit)) |>
+  ggplot(aes(Visit, NPX, color = Visit)) +
+  geom_line(aes(group = Subject),
+            alpha = 0.3,
+            color = "grey80") +
+  geom_quasirandom(alpha = 0.7, show.legend =  F) +
+  geom_boxplot(fill = NA,
+               outlier.colour = NA,
+               color = "grey20") +
+  scale_color_hpa(palette = "bamse_pal") +
+  facet_wrap( ~Assay , scales = "free_x", nrow = 1) +
+  theme_hpa(facet_title = F) 
+
+
+
+
+  plot_soma <-
+  data_bamse_soma |>
+  filter(Assay %in% protein) |>
+  inner_join(best_aptamer, by = "Assay") |> 
+  left_join(meta_bamse |>
+              select(DAid, Subject, Visit)) |>
+  mutate(Assay = factor(Assay, levels = rev(protein)),
+         Visit = factor(Visit)) |>
+  ggplot(aes(Visit, log2RFU, color = Visit)) +
+  geom_line(aes(group = Subject),
+            alpha = 0.3,
+            color = "grey80") +
+  geom_quasirandom(alpha = 0.7, show.legend = F) +
+  geom_boxplot(fill = NA,
+               outlier.colour = NA,
+               color = "grey20") +
+  scale_color_hpa(palette = "bamse_pal") +
+  facet_wrap( ~Assay , scales = "free_x", nrow = 1) +
+  theme_hpa(facet_title = F) 
+
+
+
+  plot_olink + plot_soma
+}
+
+plot_ccn5  <- plot_olink_soma("CCN5") 
+plot_ms4a1 <- plot_olink_soma("MS4A1") 
+    
+
+plot_ccn5 | plot_ms4a1 
+ggsave("results/Manuscript-figures/examples_bamse.pdf", h = 3, w = 11)
+
+```
