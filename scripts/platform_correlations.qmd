@@ -1113,12 +1113,12 @@ summary_stats <- bind_rows(correlation_results_disease) |>
   ) |>
   left_join(meta |> select(Disease, Class) |> distinct(), by = "Disease") |>
   mutate(
-    Disease = factor(Disease, levels = levels(combined_data_filtered$Disease)),
+    Disease = factor(Disease, levels = rev(levels(combined_data_filtered$Disease))),
     Category = factor(Category, levels = c("Significant in Olink", "Significant in SomaScan", "Significant in both", "Not significant in both"))
   ) |>
   filter(!grepl("BAMSE", Disease) & Disease != "Healthy")
 
-# Create the plot
+# Create the plot - ROTATED with coord_flip
 corr_by_disease_plot <- ggplot(summary_stats, aes(x = Disease, y = mean_corr, color = Category)) +
   geom_point(position = position_dodge(width = 0), size = 1.5) +
   scale_color_manual(
@@ -1130,22 +1130,23 @@ corr_by_disease_plot <- ggplot(summary_stats, aes(x = Disease, y = mean_corr, co
     ),
     name = "Significance"
   ) +
-  labs(y = "Mean ρ") +
+  labs(x = NULL, y = "Mean ρ") +
   ylim(0.1, 0.75) +
+  coord_flip() +
   theme_hd() +
   theme(
-    legend.position = "bottom",
+    legend.position = "none",
     legend.text = element_text(size = 6),
     legend.title = element_text(size = 8, face = "bold"),
     legend.key.size = unit(6, "pt"),
     axis.text = element_text(size = 6),
-    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    axis.text.x = element_text(hjust = 0.5),
+    axis.text.y = element_text(hjust = 1),
     axis.title = element_text(size = 8),
-    axis.title.x = element_blank(),
     axis.ticks.length = unit(4, "pt"),
     plot.margin = margin(t = 5, r = 5, b = 5, l = 5)
   ) +
-  guides(color = guide_legend(nrow = 1, byrow = TRUE))
+  guides(color = guide_legend(nrow = 2, byrow = TRUE))
 
 threshold <- 0.5
 below_threshold_global <- correlation |>
@@ -1160,7 +1161,7 @@ rescue_results_disease <- correlation_by_disease |>
   ) |>
   left_join(meta |> select(Disease, Class) |> distinct(), by = "Disease") |>
   mutate(
-    Disease = factor(Disease, levels = levels(combined_data_filtered$Disease))
+    Disease = factor(Disease, levels = rev(levels(combined_data_filtered$Disease)))
   ) |>
   filter(!grepl("BAMSE", Disease) & Disease != "Healthy")
 
@@ -1169,18 +1170,19 @@ rescued_bar_plot <- ggplot(rescue_results_disease, aes(x = Disease, y = n_rescue
   geom_bar(aes(fill = Class), stat = "identity", color = "black") +
   scale_fill_manual(values = disease_class) +
   scale_y_continuous(breaks = c(0, 300), limits = c(0, NA)) +
-  labs(y = "# Proteins", tag = "F") +
+  labs(x = NULL, y = "# Proteins") +
+  coord_flip() +
   theme_hd() +
   theme(
     legend.position = "none",
     axis.text = element_text(size = 6),
-    axis.text.x = element_blank(),
-    axis.ticks.x = element_blank(),
-    axis.line.x = element_blank(),
+    axis.text.x = element_text(hjust = 0.5),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.y = element_blank(),
     axis.title = element_text(size = 8),
-    axis.title.x = element_blank(),
     axis.ticks.length = unit(4, "pt"),
-    plot.margin = margin(t = 5, r = 5, b = 0, l = 5)
+    plot.margin = margin(t = 5, r = 5, b = 5, l = 0)
   )
 
 # Update corr_by_disease_plot to remove top margin
@@ -1188,19 +1190,41 @@ corr_by_disease_plot <- corr_by_disease_plot +
   theme(plot.margin = margin(t = 0, r = 5, b = 5, l = 5))
 
 # Combine bar plot on top of point plot
-combined_corr_plot <- rescued_bar_plot / corr_by_disease_plot +
-  plot_layout(heights = c(0.3, 1))
+combined_corr_plot <- corr_by_disease_plot + rescued_bar_plot +
+  plot_layout(widths = c(1, 0.3)) +
+  plot_annotation(tag_levels = list(c("F", "")))
 
-# Update the final plot assembly
+wrapped_fgr <- wrap_elements(full = boxplot_list[["FGR"]])
+wrapped_ptn <- wrap_elements(full = boxplot_list[["PTN"]])
+
+# Stack boxplots VERTICALLY instead of horizontally
+boxplot_combined <- wrapped_fgr / wrapped_ptn
+boxplot_combined[[1]] <- boxplot_combined[[1]] + labs(tag = "D")
+boxplot_combined[[2]] <- boxplot_combined[[2]] + labs(tag = "E")
+
+# DON'T wrap combined_corr_plot - use it directly with plot_spacer for alignment
+# Add the F tag directly to corr_by_disease_plot
+corr_by_disease_plot <- corr_by_disease_plot + labs(tag = "F")
+
+# Recreate combined_corr_plot without tag annotation
+combined_corr_plot <- corr_by_disease_plot + rescued_bar_plot +
+  plot_layout(widths = c(1, 0.3))
+
+# Use plot_layout with design for precise control
+bottom_row <- boxplot_combined | combined_corr_plot
+bottom_row <- bottom_row + plot_layout(widths = c(3, 1))
+
+# Stack scatter section and bottom row vertically
+combined_bottom <- scatter_wrapped / bottom_row +
+  plot_layout(heights = c(length(protein_plots)/2, 2))
+
 top_grob <- patchworkGrob(final_combined_plot)
 bottom_grob <- patchworkGrob(combined_bottom)
-combined_corr_grob <- patchworkGrob(combined_corr_plot)
 
 final_plot <- grid.arrange(
   top_grob,
   bottom_grob,
-  combined_corr_grob,
-  heights = c(1, length(protein_plots), 2)
+  heights = c(1, length(protein_plots) + 1)
 )
 
 ggsave(
