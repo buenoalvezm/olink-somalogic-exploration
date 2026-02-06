@@ -1,0 +1,268 @@
+# Pregnancy Biological Summary
+
+## Setup & Data
+
+```{r}
+library(readr)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(HDAnalyzeR)
+library(patchwork)
+
+select <- dplyr::select
+rename <- dplyr::rename
+```
+
+```{r}
+# Olink -----
+olink <- read_tsv("data/data_phase2_HT_bridged_curated_subset_20251031.tsv") |>
+    select("DAid", "Assay", "UniProt", "Batch", "NPX", "LOD")
+
+# Soma -----
+soma_wide <- read_tsv("data/data_phase2_somalogic_curated_subset_20251031.tsv")
+soma_meta <- read_tsv("data/meta_phase2_somalogic_elod_20251028.tsv")
+
+soma <- soma_wide |>
+  pivot_longer(cols = -c("DAid"), names_to = "AptName", values_to = "Value") |>
+  left_join(soma_meta |> filter(Organism == "Human") |> select(AptName, EntrezGeneSymbol), by = "AptName") |>
+  rename(Assay = EntrezGeneSymbol) |> 
+  filter(!is.na(Assay))
+
+# Sample metadata ----
+sample_meta <- read_excel("data/samples_2025-10-10.xlsx") |>
+  mutate(
+    Disease = ifelse(Cohort == "PARD", Diagnose, Disease),
+    Disease = ifelse(Disease %in% c("Healthy control", "healthy", "Control"), "Healthy", Disease),
+    Disease = case_when(Disease == "Pancreatic ductal adenocarcinoma" ~ "Pancreatic cancer",
+                        Diagnose == "OVC" ~  "Ovarian cancer",
+                        Diagnose == "BRC" ~ "Breast cancer",
+                        Diagnose == "LUNG" ~ "Lung cancer",
+                        Diagnose == "CRC" ~ "Colorectal cancer",
+                        Diagnose == "PRC" ~ "Prostate cancer",
+                        Diagnose == "4_random" ~ "BAMSE - visit 4",
+                        Diagnose == "8_random" ~ "BAMSE - visit 8",
+                        Diagnose == "16_random" ~ "BAMSE - visit 16",
+                        Diagnose == "24_random" ~ "BAMSE - visit 24",
+                        Diagnose == "pregnancy" ~ "Pregnancy",
+                        Diagnose == "PD" ~ "Parkinson's disease",
+                        T ~ Disease),
+    Class = case_when(Disease %in% c("Breast cancer", "Colorectal cancer", "Lung cancer", "Ovarian cancer", "Prostate cancer") ~ "Cancer",
+                      Disease == "Parkinson's disease" ~ "Neurologic",
+                      Cohort == "BAMS" ~ "Healthy",
+                      Cohort == "PREG" ~ "Healthy",
+                      Disease == "Healthy" ~ "Healthy",
+                      T ~ Class)
+    ) |>
+  select(DAid, Cohort, Class, Disease, Age, Sex, BMI)
+
+de_olink <- read_tsv("data/preg_olink_mm.tsv")
+de_soma <- read_tsv("data/preg_soma_mm.tsv") |> 
+  left_join(soma_meta |> filter(Organism == "Human") |> select(Assay = EntrezGeneSymbol, Protein = AptName), by = "Protein") |> 
+  group_by(contrast, Assay) |>
+  arrange(desc(t.ratio), .by_group = TRUE) |>
+  slice_head(n = 1) |>
+  ungroup() |> 
+  select(-Protein) |>
+  rename(Protein = Assay)
+```
+
+```{r}
+de_olink_t2_t1 <- de_olink |> filter(contrast == "T2 - T1")
+de_olink_t2_t1 <- list(
+  de_res = de_olink_t2_t1 |> rename(Feature = Protein, t = t.ratio)
+)
+class(de_olink_t2_t1) <- "hd_de"
+de_olink_t2_t1$de_res <- as_tibble(de_olink_t2_t1$de_res)
+enrichment_go <- hd_gsea(de_olink_t2_t1, database = "GO", ontology = "ALL", pval_lim = 0.05, ranked_by = "t")
+enrichment_kegg <- hd_gsea(de_olink_t2_t1, database = "KEGG", pval_lim = 0.05, ranked_by = "t")
+enrichment_reactome <- hd_gsea(de_olink_t2_t1, database = "Reactome", pval_lim = 0.05, ranked_by = "t")
+
+go_tbl <- as.data.frame(enrichment_go$enrichment@result) |>
+  mutate(Database = "GO")
+kegg_tbl <- as.data.frame(enrichment_kegg$enrichment@result) |>
+  mutate(Database = "KEGG")
+reactome_tbl <- as.data.frame(enrichment_reactome$enrichment@result) |>
+  mutate(Database = "Reactome")
+
+combined_olink_t2_t1 <- bind_rows(go_tbl, kegg_tbl, reactome_tbl) |> filter(p.adjust < 0.05)
+
+top_terms_olink_t2_t1 <- combined_olink_t2_t1 |>
+  group_by(Database) |>
+  arrange(p.adjust, .by_group = TRUE) |>
+  slice_head(n = 10) |>
+  ungroup()
+```
+
+```{r}
+de_olink_t3_t2 <- de_olink |> filter(contrast == "T3 - T2")
+de_olink_t3_t2 <- list(
+  de_res = de_olink_t3_t2 |> rename(Feature = Protein, t = t.ratio)
+)
+class(de_olink_t3_t2) <- "hd_de"
+de_olink_t3_t2$de_res <- as_tibble(de_olink_t3_t2$de_res)
+enrichment_go <- hd_gsea(de_olink_t3_t2, database = "GO", ontology = "ALL", pval_lim = 0.05, ranked_by = "t")
+enrichment_kegg <- hd_gsea(de_olink_t3_t2, database = "KEGG", pval_lim = 0.05, ranked_by = "t")
+enrichment_reactome <- hd_gsea(de_olink_t3_t2, database = "Reactome", pval_lim = 0.05, ranked_by = "t")
+
+go_tbl <- as.data.frame(enrichment_go$enrichment@result) |>
+  mutate(Database = "GO")
+kegg_tbl <- as.data.frame(enrichment_kegg$enrichment@result) |>
+  mutate(Database = "KEGG")
+reactome_tbl <- as.data.frame(enrichment_reactome$enrichment@result) |>
+  mutate(Database = "Reactome")
+
+combined_olink_t3_t2 <- bind_rows(go_tbl, kegg_tbl, reactome_tbl) |> filter(p.adjust < 0.05)
+
+top_terms_olink_t3_t2 <- combined_olink_t3_t2 |>
+  group_by(Database) |>
+  arrange(p.adjust, .by_group = TRUE) |>
+  slice_head(n = 10) |>
+  ungroup()
+```
+
+```{r}
+de_soma_t2_t1 <- de_soma |> filter(contrast == "T2 - T1")
+de_soma_t2_t1 <- list(
+  de_res = de_soma_t2_t1 |> rename(Feature = Protein, t = t.ratio)
+)
+class(de_soma_t2_t1) <- "hd_de"
+de_soma_t2_t1$de_res <- as_tibble(de_soma_t2_t1$de_res)
+# No significant GO terms, so only KEGG and Reactome
+enrichment_kegg <- hd_gsea(de_soma_t2_t1, database = "KEGG", pval_lim = 0.05, ranked_by = "t")
+enrichment_reactome <- hd_gsea(de_soma_t2_t1, database = "Reactome", pval_lim = 0.05, ranked_by = "t")
+
+kegg_tbl <- as.data.frame(enrichment_kegg$enrichment@result) |>
+  mutate(Database = "KEGG")
+reactome_tbl <- as.data.frame(enrichment_reactome$enrichment@result) |>
+  mutate(Database = "Reactome")
+
+combined_soma_t2_t1 <- bind_rows(kegg_tbl, reactome_tbl) |> filter(p.adjust < 0.05)
+
+top_terms_soma_t2_t1 <- combined_soma_t2_t1 |>
+  group_by(Database) |>
+  arrange(p.adjust, .by_group = TRUE) |>
+  slice_head(n = 10) |>
+  ungroup()
+```
+
+```{r}
+de_soma_t3_t2 <- de_soma |> filter(contrast == "T3 - T2")
+de_soma_t3_t2 <- list(
+  de_res = de_soma_t3_t2 |> rename(Feature = Protein, t = t.ratio)
+)
+class(de_soma_t3_t2) <- "hd_de"
+de_soma_t3_t2$de_res <- as_tibble(de_soma_t3_t2$de_res)
+enrichment_go <- hd_gsea(de_soma_t3_t2, database = "GO", ontology = "ALL", pval_lim = 0.05, ranked_by = "t")
+enrichment_kegg <- hd_gsea(de_soma_t3_t2, database = "KEGG", pval_lim = 0.05, ranked_by = "t")
+enrichment_reactome <- hd_gsea(de_soma_t3_t2, database = "Reactome", pval_lim = 0.05, ranked_by = "t")
+
+go_tbl <- as.data.frame(enrichment_go$enrichment@result) |>
+  mutate(Database = "GO")
+kegg_tbl <- as.data.frame(enrichment_kegg$enrichment@result) |>
+  mutate(Database = "KEGG")
+reactome_tbl <- as.data.frame(enrichment_reactome$enrichment@result) |>
+  mutate(Database = "Reactome")
+
+combined_soma_t3_t2 <- bind_rows(go_tbl, kegg_tbl, reactome_tbl) |> filter(p.adjust < 0.05)
+
+top_terms_soma_t3_t2 <- combined_soma_t3_t2 |>
+  group_by(Database) |>
+  arrange(p.adjust, .by_group = TRUE) |>
+  slice_head(n = 10) |>
+  ungroup()
+```
+
+```{r}
+top_terms_t2_t1 <- bind_rows(
+  top_terms_olink_t2_t1 |> mutate(Platform = "Olink"),
+  top_terms_soma_t2_t1 |> mutate(Platform = "SomaScan")
+)
+
+top_terms_t3_t2 <- bind_rows(
+  top_terms_olink_t3_t2 |> mutate(Platform = "Olink"),
+  top_terms_soma_t3_t2 |> mutate(Platform = "SomaScan")
+)
+```
+
+```{r}
+pal_time <- c("T1" = "#CDDBCD", "T2" = "#DFC688", "T3" = "#C88A6B")
+pal_platform <- c("Olink" = "#6FC2EE", "SomaScan" = "#D82F88")
+
+terms_t2 <- unique(top_terms_t2_t1$Description)
+terms_t3 <- unique(top_terms_t3_t2$Description)
+
+merged_data <- bind_rows(
+  top_terms_t2_t1 |> mutate(Comparison = "T1 to T2"),
+  top_terms_t3_t2 |> mutate(Comparison = "T2 to T3")
+) |>
+  group_by(Description) |>
+  mutate(
+    Status = case_when(
+      Description %in% terms_t2 & Description %in% terms_t3 ~ "Shared",
+      Description %in% terms_t2 ~ "T1 to T2",
+      Description %in% terms_t3 ~ "T2 to T3"
+    ),
+    avg_nes = mean(NES)
+  ) |>
+  ungroup() |>
+  mutate(Description = reorder(Description, avg_nes))
+
+bar_dots <- merged_data |>
+  distinct(Description, Status) |>
+  mutate(y_idx = as.numeric(Description)) |>
+  group_by(Description) |>
+  reframe(
+    x = case_when(
+      Status == "T1 to T2" ~ list(c(1, 2)),
+      Status == "T2 to T3" ~ list(c(2, 3)),
+      Status == "Shared" ~ list(c(1, 2, 3))
+    ),
+    fill = case_when(
+      Status == "T1 to T2" ~ list(c(pal_time["T1"], pal_time["T2"])),
+      Status == "T2 to T3" ~ list(c(pal_time["T2"], pal_time["T3"])),
+      Status == "Shared" ~ list(c(pal_time["T1"], pal_time["T2"], pal_time["T3"]))
+    ),
+    y_idx = y_idx
+  ) |>
+  unnest(cols = c(x, fill))
+
+n_terms <- length(unique(merged_data$Description))
+
+p_main <- ggplot(merged_data, aes(x = Description, y = NES, color = Platform)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey90") +
+  geom_point(aes(size = -log10(p.adjust), shape = Comparison), alpha = 0.8) +
+  coord_flip() +
+  scale_color_manual(values = pal_platform) +
+  scale_shape_manual(values = c("T1 to T2" = 17, "T2 to T3" = 16)) +
+  scale_x_discrete(labels = scales::label_wrap(65), expand = expansion(add = 0.6)) + 
+  labs(x = NULL, y = "Normalized Enrichment Score") +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 6, lineheight = 0.6),
+    axis.title = element_text(size = 8, face = "bold"),
+    legend.position = "bottom",
+    legend.text = element_text(size = 6),
+    legend.title = element_text(size = 8, face = "bold"),
+    plot.margin = margin(5, 0, 5, 5)
+  )
+
+p_side <- ggplot(bar_dots, aes(x = x, y = y_idx)) +
+  geom_line(aes(group = y_idx), color = "grey92", linewidth = 1.2, lineend = "round") +
+  geom_point(aes(fill = fill), shape = 21, color = "white", size = 3, stroke = 0.1) +
+  scale_fill_identity() +
+  scale_x_continuous(limits = c(0.5, 3.5)) +
+  scale_y_continuous(limits = c(1, n_terms), expand = expansion(add = 0.6)) +
+  theme_void() +
+  theme(
+    plot.margin = margin(5, 5, 5, 2)
+  )
+
+enrichment_dots_final <- (p_main + p_side) + 
+  plot_layout(widths = c(1, 0.12)) +
+  plot_annotation(
+  )
+
+enrichment_dots_final
+```

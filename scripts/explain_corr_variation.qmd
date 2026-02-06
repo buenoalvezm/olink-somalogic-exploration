@@ -1,0 +1,190 @@
+
+```{r}
+library(readr)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(tidymodels)
+library(vip)
+```
+
+```{r}
+olink <- read_tsv("data/data_phase2_HT_bridged_curated_subset_20251031.tsv") |>
+    select("DAid", "Assay", "UniProt", "Batch", "NPX", "LOD")
+
+soma_wide <- read_tsv("data/data_phase2_somalogic_curated_subset_20251031.tsv")
+soma_meta <- read_tsv("data/meta_phase2_somalogic_elod_20251028.tsv")
+
+soma <- soma_wide |>
+  pivot_longer(cols = -c("DAid"), names_to = "AptName", values_to = "Value") |>
+  left_join(soma_meta |> filter(Organism == "Human") |> select(AptName,eLOD, EntrezGeneSymbol), by = "AptName") |>
+  rename(Assay = EntrezGeneSymbol)
+
+sample_meta <- read_excel("data/samples_2025-10-10.xlsx") |>
+  mutate(
+    Disease = ifelse(Cohort == "PARD", Diagnose, Disease),
+    Disease = ifelse(Disease %in% c("Healthy control", "healthy", "Control"), "Healthy", Disease),
+    Disease = case_when(Disease == "Pancreatic ductal adenocarcinoma" ~ "Pancreatic cancer",
+                        Diagnose == "OVC" ~  "Ovarian cancer",
+                        Diagnose == "BRC" ~ "Breast cancer",
+                        Diagnose == "LUNG" ~ "Lung cancer",
+                        Diagnose == "CRC" ~ "Colorectal cancer",
+                        Diagnose == "PRC" ~ "Prostate cancer",
+                        Diagnose == "4_random" ~ "BAMSE - visit 4",
+                        Diagnose == "8_random" ~ "BAMSE - visit 8",
+                        Diagnose == "16_random" ~ "BAMSE - visit 16",
+                        Diagnose == "24_random" ~ "BAMSE - visit 24",
+                        Diagnose == "pregnancy" ~ "Pregnancy",
+                        Diagnose == "PD" ~ "Parkinson's disease",
+                        T ~ Disease),
+    Class = case_when(Disease %in% c("Breast cancer", "Colorectal cancer", "Lung cancer", "Ovarian cancer", "Prostate cancer") ~ "Cancer",
+                      Disease == "Parkinson's disease" ~ "Neurologic",
+                      Cohort == "BAMS" ~ "Healthy",
+                      Cohort == "PREG" ~ "Healthy",
+                      Disease == "Healthy" ~ "Healthy",
+                      T ~ Class)
+    ) |>
+  select(DAid, Cohort, Class, Disease, Age, Sex, BMI)
+
+# Other protein imformation ----
+hpa_metadata <- read_tsv("data/proteinatlas.tsv")
+
+protein_tiers <- read_excel("data/proteins_classified_tiers.xlsx") |>
+  select(Assay = Gene, Tier = `confidence tier`) |>
+  mutate(Tier = as.factor(Tier))
+
+```
+
+```{r}
+common_daids <- intersect(unique(olink |> pull(DAid)), unique(soma |> pull(DAid)))
+common_assays <- intersect(unique(olink |> pull(Assay)), unique(soma |> pull(Assay)))
+
+olink <- olink |> filter(DAid %in% common_daids, Assay %in% common_assays)
+soma <- soma |> filter(DAid %in% common_daids, Assay %in% common_assays)
+
+meta <- sample_meta |> filter(DAid %in% common_daids)
+```
+
+```{r}
+correlation <- olink |>
+  inner_join(soma, by = c("DAid", "Assay")) |>
+  group_by(Assay, AptName) |>
+  summarise(
+    correlation = if (sum(is.finite(NPX) & is.finite(Value)) > 1)
+      suppressWarnings(cor(NPX, Value, method = "spearman", use = "complete.obs"))
+    else
+      NA_real_,
+    .groups = "drop"
+  ) |> 
+  group_by(Assay) |>
+  slice_max(order_by = correlation, n = 1, with_ties = FALSE) |>
+  ungroup() |> 
+  select(Assay, correlation)
+```
+
+```{r}
+# Get LOD per Assay from Olink
+olink_lod <- olink |>
+  mutate(above_lod = NPX > LOD) |>
+  group_by(Assay) |>
+  summarise(
+    Olink_LOD = mean(above_lod, na.rm = TRUE) * 100,
+    .groups = "drop"
+  )
+
+# Get eLOD per Assay from SomaScan
+soma_elod <- soma |>
+  mutate(above_lod = Value > eLOD) |>
+  group_by(Assay) |>
+  summarise(
+    SomaScan_LOD = mean(above_lod, na.rm = TRUE) * 100,
+    .groups = "drop"
+  )
+
+# Merge LOD and eLOD, then add protein tiers
+features <- olink_lod |>
+  left_join(soma_elod, by = "Assay") |>
+  left_join(protein_tiers, by = "Assay") |> 
+  mutate(Tier = replace_na(as.character(Tier), "Unclassified")) |> 
+  left_join(hpa_metadata |> 
+      rename(Assay = Gene) |> 
+      select(Assay, Ensembl, `Protein class`, `Secretome location`, `Subcellular location`, `RNA tissue specificity`, `RNA tissue distribution`, `RNA single nuclei brain specificity`, `RNA single nuclei brain distribution`, `RNA single cell type specificity`, `RNA single cell type distribution`, `RNA blood cell specificity`, `RNA blood cell distribution`, `RNA cancer specificity`, `RNA cancer distribution`), 
+    by = "Assay") |> 
+  filter(!is.na(Ensembl)) |> 
+  select(-Ensembl) |> 
+  mutate(
+    across(
+      contains("distribution") | contains("specificity"),
+      ~replace_na(.x, "Not detected")
+    ),
+    `Secretome location` = replace_na(`Secretome location`, "Unknown"),
+    `Subcellular location` = replace_na(`Subcellular location`, "Unknown")
+  ) |> left_join(correlation, by = "Assay")
+```
+
+```{r}
+# Prepare features
+features_rf <- features |>
+  select(-Assay) |>  # Assay is the ID, not a predictor
+  mutate(
+    across(where(is.character), as.factor)
+  )
+
+# Multi-hot encode Subcellular location
+subcell_mat <- features$`Subcellular location` |>
+  str_split(",") |>
+  lapply(str_trim) |>
+  unique() |>
+  unlist() |>
+  unique() |>
+  sort()
+
+subcell_types <- unique(unlist(str_split(features$`Subcellular location`, ",")))
+subcell_types <- str_trim(subcell_types)
+subcell_types <- unique(subcell_types[subcell_types != "Unknown"])
+
+subcell_matrix <- sapply(subcell_types, function(loc) {
+  str_detect(features$`Subcellular location`, stringr::fixed(loc))
+}) * 1
+colnames(subcell_matrix) <- paste0("Subcell_", make.names(subcell_types))
+
+# Combine with features
+features_rf <- features_rf |>
+  select(-`Subcellular location`) |>
+  bind_cols(as_tibble(subcell_matrix))
+
+# Split data
+set.seed(123)
+data_split <- initial_split(features_rf, strata = correlation)
+train_data <- training(data_split)
+test_data  <- testing(data_split)
+
+# Recipe: encode all categorical variables except subcellular
+rf_recipe <- recipe(correlation ~ ., data = train_data) |>
+  step_dummy(all_nominal_predictors())
+
+# Model specification with importance
+rf_spec <- rand_forest(mode = "regression") |>
+  set_engine("ranger", importance = "permutation")
+
+rf_wf <- workflow() |>
+  add_recipe(rf_recipe) |>
+  add_model(rf_spec)
+
+# Fit model
+rf_fit <- rf_wf |> fit(data = train_data)
+
+# Variable importance plot
+vip(rf_fit$fit$fit)
+
+# Predict on test set
+preds <- predict(rf_fit, test_data) |> bind_cols(test_data)
+
+# Performance metrics
+metrics <- preds |>
+  metrics(truth = correlation, estimate = .pred)
+
+metrics
+```

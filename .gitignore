@@ -8,6 +8,7 @@
 /results
 /output_reports
 .DS_store
+/Literature
 /scripts/disease_reports
 /scripts/others
 /results_*
