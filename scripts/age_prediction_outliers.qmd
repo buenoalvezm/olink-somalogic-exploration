@@ -1,0 +1,520 @@
+# Age Prediction Outliers Analysis
+
+## Setup & Data
+
+```{r}
+library(readr)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(HDAnalyzeR)
+library(limma)
+library(tibble)
+library(patchwork)
+library(stringr)
+library(vegan)
+library(ggrepel)
+library(viridis)
+
+select <- dplyr::select
+rename <- dplyr::rename
+```
+
+```{r}
+# Olink -----
+olink <- read_tsv("data/data_phase2_HT_bridged_curated_subset_20251031.tsv") |>
+    select("DAid", "Assay", "UniProt", "Batch", "NPX", "LOD")
+
+# Soma -----
+soma_wide <- read_tsv("data/data_phase2_somalogic_curated_subset_20251031.tsv")
+soma_meta <- read_tsv("data/meta_phase2_somalogic_elod_20251028.tsv")
+
+soma <- soma_wide |>
+  pivot_longer(cols = -c("DAid"), names_to = "AptName", values_to = "Value") |>
+  left_join(soma_meta |> filter(Organism == "Human") |> select(AptName,eLOD, EntrezGeneSymbol), by = "AptName") |>
+  rename(Assay = EntrezGeneSymbol)
+
+# Sample metadata ----
+sample_meta <- read_excel("data/samples_2025-10-10.xlsx") |>
+  mutate(
+    Disease = ifelse(Cohort == "PARD", Diagnose, Disease),
+    Disease = ifelse(Disease %in% c("Healthy control", "healthy", "Control"), "Healthy", Disease),
+    Disease = case_when(Disease == "Pancreatic ductal adenocarcinoma" ~ "Pancreatic cancer",
+                        Diagnose == "OVC" ~  "Ovarian cancer",
+                        Diagnose == "BRC" ~ "Breast cancer",
+                        Diagnose == "LUNG" ~ "Lung cancer",
+                        Diagnose == "CRC" ~ "Colorectal cancer",
+                        Diagnose == "PRC" ~ "Prostate cancer",
+                        Diagnose == "4_random" ~ "BAMSE - visit 4",
+                        Diagnose == "8_random" ~ "BAMSE - visit 8",
+                        Diagnose == "16_random" ~ "BAMSE - visit 16",
+                        Diagnose == "24_random" ~ "BAMSE - visit 24",
+                        Diagnose == "pregnancy" ~ "Pregnancy",
+                        Diagnose == "PD" ~ "Parkinson's disease",
+                        T ~ Disease),
+    Class = case_when(Disease %in% c("Breast cancer", "Colorectal cancer", "Lung cancer", "Ovarian cancer", "Prostate cancer") ~ "Cancer",
+                      Disease == "Parkinson's disease" ~ "Neurologic",
+                      Cohort == "BAMS" ~ "Healthy",
+                      Cohort == "PREG" ~ "Healthy",
+                      Disease == "Healthy" ~ "Healthy",
+                      T ~ Class)
+    ) |>
+  select(DAid, Cohort, Class, Disease, Age, Sex, BMI)
+
+# Other protein imformation ----
+diff_exp_proteins <- read_tsv("data/de_diseases_olink_soma_overlapping.tsv")
+
+# Age prediction model results ----
+age_pred_results <- read_tsv("data/offset_age_models.tsv")
+```
+
+## DEA accelerating vs decelerating outliers
+
+1. Define outliers based on age prediction results
+2. Run DEA between accelerating and decelerating outliers for Olink and Soma combined
+
+```{r}
+proteins_to_remove <- c(
+  "CCN5", "EPHA6", "DKK2", "TMEM130", "GFAP", "CXCL17", "PODXL2", 
+  "EDA2R", "IGDCC4", "TMEM132B", "CCL27", "WNT9A", "FSHB", "MSMP", 
+  "ELN", "NTN4", "ITGB3P", "ITGAV", "ADAMTSL1", "PTPRR", "NPPB"
+)
+
+common_daids <- intersect(unique(olink |> pull(DAid)), unique(soma |> pull(DAid)))
+common_daids <- intersect(common_daids, unique(age_pred_results |> pull(DAid)))
+meta <- sample_meta |> filter(DAid %in% common_daids)
+
+dat <- olink |> 
+  filter(DAid %in% common_daids) |> 
+  select(DAid, Assay, NPX) |>
+  pivot_wider(names_from = Assay, values_from = NPX) |>
+  left_join(soma_wide |> filter(DAid %in% common_daids), by = "DAid")
+
+metadat <- age_pred_results |> filter(Model == "Combined") |> mutate(Offset = Predicted_age - Age) |>
+  left_join(meta |> select(DAid, Disease, Sex, BMI, Cohort), by = "DAid")
+
+hd_olink <- hd_initialize(
+  olink |> 
+    filter(DAid %in% common_daids) |> 
+    select(DAid, Assay, NPX) |>
+    #filter(!Assay %in% proteins_to_remove) |> 
+    pivot_wider(names_from = Assay, values_from = NPX), 
+  metadat, 
+  is_wide = TRUE
+)
+hd_soma <- hd_initialize(
+  soma_wide |> filter(DAid %in% common_daids), #|> select(!any_of(proteins_to_remove)),
+  metadat, 
+  is_wide = TRUE
+)
+hd_obj <- hd_initialize(dat, metadat, is_wide = TRUE)
+```
+
+### Olink
+
+```{r}
+expr_matrix <- hd_olink$data |>
+  column_to_rownames("DAid") |>
+  t()
+
+meta_ordered <- metadat |>
+  filter(DAid %in% colnames(expr_matrix)) |>
+  arrange(match(DAid, colnames(expr_matrix)))
+
+design <- model.matrix(~ Offset + Age + Sex + Disease, data = meta_ordered)
+fit <- lmFit(expr_matrix, design)
+fit <- eBayes(fit)
+
+results_olink <- topTable(fit, coef = "Offset", number = Inf, adjust.method = "BH") |>
+  as_tibble(rownames = "Feature") |>
+  arrange(adj.P.Val)
+
+de_res_olink <- list(
+  de_res = results_olink
+)
+class(de_res_olink) <- "hd_de"
+
+de_res_olink |> 
+  hd_plot_volcano()
+```
+
+```{r}
+enrichment_go <- hd_gsea(de_res_olink, database = "GO", ontology = "ALL", pval_lim = 0.05, ranked_by = "t")
+enrichment_kegg <- hd_gsea(de_res_olink, database = "KEGG", pval_lim = 0.05, ranked_by = "t")
+enrichment_reactome <- hd_gsea(de_res_olink, database = "Reactome", pval_lim = 0.05, ranked_by = "t")
+
+go_tbl <- as.data.frame(enrichment_go$enrichment@result) |>
+  mutate(Database = "GO")
+kegg_tbl <- as.data.frame(enrichment_kegg$enrichment@result) |>
+  mutate(Database = "KEGG")
+reactome_tbl <- as.data.frame(enrichment_reactome$enrichment@result) |>
+  mutate(Database = "Reactome")
+
+combined_olink <- bind_rows(go_tbl, kegg_tbl, reactome_tbl) |> filter(p.adjust < 0.05)
+
+top_terms_olink <- combined_olink |>
+  group_by(Database) |>
+  arrange(p.adjust, .by_group = TRUE) |>
+  slice_head(n = 10) |>
+  ungroup()
+
+ggplot(top_terms_olink, aes(x = reorder(Description, NES), y = NES, color = Database, size = -log10(p.adjust))) +
+  geom_point() +
+  coord_flip() +
+  labs(
+    x = "Pathway",
+    y = "Normalized Enrichment Score (NES)",
+    color = "Database",
+    size = "-log10(adj. p-value)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 7),
+    legend.position = "right"
+  )
+```
+
+### SomaScan
+
+```{r}
+expr_matrix <- hd_soma$data |>
+  column_to_rownames("DAid") |>
+  t()
+
+meta_ordered <- metadat |>
+  filter(DAid %in% colnames(expr_matrix)) |>
+  arrange(match(DAid, colnames(expr_matrix)))
+
+design <- model.matrix(~ Offset + Age + Sex + Disease, data = meta_ordered)
+fit <- lmFit(expr_matrix, design)
+fit <- eBayes(fit)
+
+results_soma <- topTable(fit, coef = "Offset", number = Inf, adjust.method = "BH") |>
+  as_tibble(rownames = "Feature") |>
+  arrange(adj.P.Val) |> 
+  left_join(soma |> distinct(Assay, AptName), by = c("Feature" = "AptName")) |> 
+  group_by(Assay) |> 
+  slice_max(order_by = abs(t), n = 1) |>
+  ungroup() |> 
+  dplyr::rename(AptName = Feature, Feature = Assay)
+
+de_res_soma <- list(
+  de_res = results_soma
+)
+class(de_res_soma) <- "hd_de"
+
+de_res_soma |> 
+  hd_plot_volcano()
+```
+
+```{r}
+enrichment_go <- hd_gsea(de_res_soma, database = "GO", ontology = "ALL", pval_lim = 0.05, ranked_by = "t")
+enrichment_kegg <- hd_gsea(de_res_soma, database = "KEGG", pval_lim = 0.05, ranked_by = "t")
+enrichment_reactome <- hd_gsea(de_res_soma, database = "Reactome", pval_lim = 0.05, ranked_by = "t")
+
+go_tbl <- as.data.frame(enrichment_go$enrichment@result) |>
+  mutate(Database = "GO")
+kegg_tbl <- as.data.frame(enrichment_kegg$enrichment@result) |>
+  mutate(Database = "KEGG")
+reactome_tbl <- as.data.frame(enrichment_reactome$enrichment@result) |>
+  mutate(Database = "Reactome")
+
+combined_soma <- bind_rows(go_tbl, kegg_tbl, reactome_tbl) |> filter(p.adjust < 0.05)
+
+top_terms_soma <- combined_soma |>
+  group_by(Database) |>
+  arrange(p.adjust, .by_group = TRUE) |>
+  slice_head(n = 10) |>
+  ungroup()
+
+ggplot(top_terms_soma, aes(x = reorder(Description, NES), y = NES, color = Database, size = -log10(p.adjust))) +
+  geom_point() +
+  coord_flip() +
+  labs(
+    x = "Pathway",
+    y = "Normalized Enrichment Score (NES)",
+    color = "Database",
+    size = "-log10(adj. p-value)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 7),
+    legend.position = "right"
+  )
+```
+
+### Combined plots
+
+Log2(FC) concordance between Olink and SomaScan.
+
+```{r}
+olink_tbl <- de_res_olink$de_res |> dplyr::select(Feature, logFC, adj.P.Val) |> 
+  dplyr::rename(logFC_olink = logFC, adjP_olink = adj.P.Val)
+soma_tbl  <- de_res_soma$de_res  |> dplyr::select(Feature, logFC, adj.P.Val) |> 
+  dplyr::rename(logFC_soma = logFC, adjP_soma = adj.P.Val)
+
+de_compare <- full_join(olink_tbl, soma_tbl, by = "Feature") |>
+  mutate(
+    logFC_olink = replace_na(logFC_olink, 0),
+    logFC_soma  = replace_na(logFC_soma, 0),
+    sig_olink = adjP_olink < 0.05,
+    sig_soma  = adjP_soma < 0.05,
+    sig_olink = replace_na(sig_olink, FALSE),
+    sig_soma  = replace_na(sig_soma, FALSE),
+    sig_cat = case_when(
+      sig_olink & sig_soma ~ "Significant in both",
+      sig_olink & !sig_soma ~ "Significant in Olink",
+      !sig_olink & sig_soma ~ "Significant in SomaScan",
+      TRUE ~ "Not significant in both"
+    )
+  )
+
+de_pal = c(
+  "Significant in Olink" = "#6FC2EE",
+  "Significant in SomaScan" = "#D82F88",
+  "Significant in both" = "#312F7C",
+  "Not significant in both" = "#E5E5E5"
+)
+
+de_validation_plot <- ggplot(de_compare, aes(x = logFC_olink, y = logFC_soma, color = sig_cat)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey80") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey80") +
+  geom_point(aes(alpha = ifelse(sig_cat == "Not significant in both", 0.08, 0.4)), size = 1) +
+  scale_color_manual(values = de_pal, name = "Significance") +
+  scale_alpha_identity() +
+  labs(
+    x = "log2FC(Olink)",
+    y = "log2FC(SomaScan)"
+  ) +
+  theme_hd() +
+  theme(
+    legend.position = "None",
+    legend.text = element_text(size = 6),
+    legend.title = element_text(size = 8, face = "bold"),
+    axis.text = element_text(size = 6),
+    axis.text.x = element_text(hjust = 0.5),
+    axis.title = element_text(size = 8, face = "bold")
+  )
+
+de_validation_plot
+```
+
+Enrichment results for Olink and SomaScan combined in one plot, colored by platform.
+
+```{r}
+top_terms <- bind_rows(
+  top_terms_olink |> mutate(Platform = "Olink"),
+  top_terms_soma |> mutate(Platform = "SomaScan")
+)
+
+pal_platform <- c(
+  "Olink" = "#6FC2EE",
+  "SomaScan" = "#D82F88"
+)
+
+enrichment_comb_plot <- ggplot(top_terms, aes(x = reorder(Description, NES), y = NES, color = Platform, size = -log10(p.adjust))) +
+  geom_point() +
+  coord_flip() +
+  scale_color_manual(values = pal_platform) +
+  scale_y_continuous(name = "Normalized Enrichment Score") +
+  scale_x_discrete(labels = scales::label_wrap(50)) +
+  labs(
+    x = NULL,
+    color = "Platform",
+    size = "-log10(adj. p-value)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 6),
+    axis.title = element_text(size = 8, face = "bold"),
+    legend.text = element_text(size = 6),
+    legend.title = element_text(size = 8, face = "bold"),
+    legend.position = "none",
+    plot.margin = margin(t = 5, r = 5, b = 5, l = 5),
+  )
+
+enrichment_comb_plot
+```
+
+Top proteins driving the difference between accelerating and decelerating outliers in Olink and SomaScan, colored by Offset.
+
+```{r}
+# 1. Data Preparation
+top4_olink <- c("COLEC12", "SCARF2")
+top4_soma <- c("EHD2", "PDLIM3")
+
+olink_long <- hd_olink$data |>
+  dplyr::select(DAid, dplyr::all_of(top4_olink)) |>
+  pivot_longer(-DAid, names_to = "Protein", values_to = "Value") |>
+  mutate(Platform = "Olink")
+
+soma_long <- hd_soma$data |>
+  pivot_longer(-c("DAid"), names_to = "AptName", values_to = "Value") |>
+  filter(AptName %in% results_soma$AptName) |> 
+  left_join(soma |> distinct(Assay, AptName), by = c("AptName")) |> 
+  filter(Assay %in% top4_soma) |>
+  dplyr::select(-AptName) |>
+  pivot_wider(names_from = Assay, values_from = Value) |>
+  pivot_longer(-DAid, names_to = "Protein", values_to = "Value") |>
+  mutate(Platform = "SomaScan")
+
+plot_data <- bind_rows(olink_long, soma_long) |>
+  left_join(metadat |> dplyr::select(DAid, Age, Offset), by = "DAid") |>
+  mutate(point_alpha = ifelse(Offset >= -5 & Offset <= 5, 0.3, 0.9))
+
+offset_max <- max(abs(plot_data$Offset), na.rm = TRUE)
+offset_limits <- c(-offset_max, offset_max)
+
+# 2. Side Annotation Grobs (Rotated)
+olink_annot <- ggplot() + 
+  annotate("text", x = 1, y = 1, label = "Olink", angle = 90, size = 4, fontface = "bold") +
+  theme_void() + 
+  theme(panel.background = element_rect(fill = "#6FC2EE", color = NA))
+
+soma_annot <- ggplot() + 
+  annotate("text", x = 1, y = 1, label = "SomaScan", angle = 90, size = 4, fontface = "bold") +
+  theme_void() + 
+  theme(panel.background = element_rect(fill = "#D82F88", color = NA))
+
+# 3. Olink Plot (Top)
+olink_p <- ggplot(plot_data |> filter(Platform == "Olink"), aes(x = Age, y = Value, color = Offset)) +
+  geom_point(aes(alpha = point_alpha), size = 1) +
+  scale_alpha_identity() +
+  facet_wrap(~ Protein, ncol = 2, scales = "free_y") +
+  scale_color_gradient2(low = "#6C6EB1", mid = "#FFFFFF", high = "#B3584D", midpoint = 0, limits = offset_limits) +
+  labs(x = NULL, y = "NPX") + # Removing x-axis label for the top row
+  theme_hd() +
+  theme(
+    legend.position = "none", 
+    legend.text = element_text(size = 6),
+    legend.title = element_text(size = 8, face = "bold"),
+    axis.text = element_text(size = 6),
+    axis.title = element_text(size = 8, face = "bold"),
+    strip.text = element_text(face = "bold"), 
+    axis.text.x = element_text(hjust = 0.5), 
+    plot.margin = margin(t = 5, r = 5, b = 5, l = 5)
+  )
+
+# 4. SomaScan Plot (Bottom)
+soma_p <- ggplot(plot_data |> filter(Platform == "SomaScan"), aes(x = Age, y = Value, color = Offset)) +
+  geom_point(aes(alpha = point_alpha), size = 1) +
+  scale_alpha_identity() +
+  facet_wrap(~ Protein, ncol = 2, scales = "free_y") +
+  scale_color_gradient2(low = "#6C6EB1", mid = "#FFFFFF", high = "#B3584D", midpoint = 0, limits = offset_limits) +
+  labs(x = "Chronological Age", y = "log2RFU") +
+  theme_hd() +
+  theme(
+    legend.position = "none", 
+    legend.text = element_text(size = 6),
+    legend.title = element_text(size = 8, face = "bold"),
+    axis.text = element_text(size = 6),
+    axis.title = element_text(size = 8, face = "bold"),
+    strip.text = element_text(face = "bold"), 
+    axis.text.x = element_text(hjust = 0.5), 
+    plot.margin = margin(t = 5, r = 5, b = 5, l = 5)
+  )
+
+# 5. Extract Legend
+shared_legend <- cowplot::get_legend(
+  ggplot(plot_data, aes(x = Age, y = Value, color = Offset)) + 
+    geom_point() + 
+    scale_color_gradient2(low = "#6C6EB1", mid = "#FFFFFF", high = "#B3584D", name = "Age Offset") +
+    theme(legend.direction = "horizontal", legend.key.width = unit(1.5, "cm"), legend.text = element_text(size = 6), legend.title = element_text(size = 8, face = "bold"))
+)
+
+# 6. Combined Layout (2x2 with side annotations)
+layout <- "
+AB
+CD
+EE
+"
+
+final_plot <- wrap_plots(
+  A = olink_annot, B = olink_p,
+  C = soma_annot, D = soma_p,
+  E = shared_legend,
+  design = layout,
+  widths = c(0.05, 1),
+  heights = c(1, 1, 0.2)
+)
+
+final_plot
+```
+
+```{r}
+# Outliers using 1.5*IQR logic
+offset_iqr  <- IQR(metadat$Offset, na.rm = TRUE)
+offset_q1   <- quantile(metadat$Offset, 0.25, na.rm = TRUE)
+offset_q3   <- quantile(metadat$Offset, 0.75, na.rm = TRUE)
+offset_low  <- offset_q1 - 1.5 * offset_iqr
+offset_high <- offset_q3 + 1.5 * offset_iqr
+
+olink_de <- de_res_olink$de_res |> filter(adj.P.Val < 0.05) |> pull(Feature)
+soma_de  <- de_res_soma$de_res  |> filter(adj.P.Val < 0.05) |> pull(Feature)
+
+# DE proteins for Olink and SomaScan combined in one matrix for PCoA, colored by Offset and shaped by outlier status
+olink_data <- hd_olink$data |>
+  dplyr::select(DAid, all_of(olink_de)) |>
+  pivot_longer(-DAid, names_to = "Feature", values_to = "Value") |>
+  mutate(Feature_ID = paste0(Feature, " (Olink)"))
+
+soma_data <- hd_soma$data |>
+  pivot_longer(-DAid, names_to = "AptName", values_to = "Value") |>
+  filter(AptName %in% results_soma$AptName) |> 
+  left_join(soma |> distinct(Assay, AptName), by = "AptName") |> 
+  filter(Assay %in% soma_de) |>
+  mutate(Feature_ID = paste0(Assay, " (SomaScan)")) |>
+  dplyr::select(DAid, Feature_ID, Value)
+
+de_wide <- bind_rows(olink_data, soma_data) |>
+  group_by(Feature_ID) |>
+  mutate(Z = as.vector(scale(Value))) |>
+  ungroup() |>
+  dplyr::select(DAid, Feature_ID, Z) |>
+  pivot_wider(names_from = Feature_ID, values_from = Z) |>
+  column_to_rownames("DAid") |>
+  drop_na()
+
+pcoa_res <- capscale(de_wide ~ 1, distance = "euclidean")
+pcoa_scores <- as.data.frame(scores(pcoa_res, display = "sites")) |>
+  rownames_to_column("DAid") |>
+  left_join(metadat, by = "DAid") |>
+  mutate(Group = case_when(
+    Offset > offset_high ~ "Acc. aging",
+    Offset < offset_low ~ "Dec. aging",
+    TRUE ~ "Average"
+  ))
+
+mds_plot <- ggplot(pcoa_scores, aes(x = MDS1, y = MDS2)) +
+  stat_density_2d(aes(fill = ..level..), geom = "polygon", alpha = 0.1, show.legend = FALSE) +
+  geom_point(data = filter(pcoa_scores, Group == "Average"), 
+             aes(color = Age), alpha = 0.5, size = 1) +
+  geom_point(data = filter(pcoa_scores, Group != "Average"), 
+             aes(shape = Group, color = Age), size = 3, stroke = 1.5) +
+  # geom_text_repel(data = filter(pcoa_scores, Group != "Average"), 
+  #                 aes(label = paste0("Age:", Age, "\nOff:", round(Offset, 1))),
+  #                 size = 2, fontface = "bold", box.padding = 0.5) +
+  scale_color_viridis_c(option = "magma", name = "Chronological Age", direction = -1) +
+  scale_shape_manual(values = c("Acc. aging" = 17, "Dec. aging" = 16)) +
+  theme_hd() +
+  labs(x = "PC1", y = "PC2") + 
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 6),
+        legend.title = element_text(size = 8, face = "bold"),
+        axis.text = element_text(size = 6),
+        axis.title = element_text(size = 8, face = "bold"),
+        axis.text.x = element_text(hjust = 0.5),
+        plot.margin = margin(t = 5, r = 5, b = 5, l = 5))
+
+mds_plot
+```
+
+Combine all.
+
+```{r}
+left_col <- de_validation_plot / final_plot / mds_plot + plot_layout(heights = c(0.4, 0.5, 0.4))
+final_layout <- (left_col | enrichment_comb_plot) + plot_layout(widths = c(0.7, 0.3))
+
+ggsave("results/combined_figure.png", final_layout, width = 21, height = 29.7, units = "cm")
+```
