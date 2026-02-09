@@ -1047,3 +1047,47 @@ ggsave(
   units = "cm"
 )
 ```
+
+## Intra-SomaScan Correlations
+
+```{r}
+apt_counts <- soma |> count(Assay, AptName) |> count(Assay, name = "n_apt") |> filter(n_apt > 1)
+multi_assays <- apt_counts$Assay
+
+soma_multi <- soma |> filter(Assay %in% multi_assays)
+
+cor_results <- lapply(multi_assays, function(assay) {
+  dat <- soma_multi |> filter(Assay == assay) |> select(DAid, AptName, Value)
+  wide <- dat |> pivot_wider(names_from = AptName, values_from = Value)
+  aptnames <- setdiff(names(wide), "DAid")
+  if (length(aptnames) < 2) return(NULL)
+  combs <- combn(aptnames, 2, simplify = FALSE)
+  lapply(combs, function(pair) {
+    vals <- wide |> select(all_of(pair))
+    cor_val <- suppressWarnings(cor(vals[[1]], vals[[2]], method = "spearman", use = "complete.obs"))
+    data.frame(Assay = assay, AptName1 = pair[1], AptName2 = pair[2], correlation = cor_val)
+  }) |> bind_rows()
+}) |> bind_rows()
+
+ggplot(cor_results, aes(x = correlation)) +
+  geom_histogram(binwidth = 0.05, color = "black", fill = "lightblue") +
+  labs(
+    x = "Intra-SomaScan Spearman correlations",
+    y = "# Somamers"
+  ) +
+  theme_hd() +
+  theme(
+    axis.text = element_text(size = 6),
+    axis.text.x = element_text(hjust = 0.5),
+    axis.title = element_text(size = 8),
+    axis.ticks.length = unit(4, "pt"),
+    plot.margin = margin(t = 5, r = 5, b = 5, l = 5)
+  )
+
+ggsave(
+  filename = "results/intra_somascan_correlations.png",
+  width = 8,
+  height = 6,
+  units = "cm"
+)
+```
