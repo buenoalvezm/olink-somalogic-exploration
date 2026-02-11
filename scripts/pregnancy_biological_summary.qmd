@@ -240,7 +240,7 @@ p_main <- ggplot(merged_data, aes(x = Description, y = NES, color = Platform)) +
   labs(x = NULL, y = "Normalized Enrichment Score") +
   theme_minimal() +
   theme(
-    axis.text.y = element_text(size = 6, lineheight = 0.6),
+    axis.text.y = element_text(size = 6, lineheight = 0.8),
     axis.title = element_text(size = 8, face = "bold"),
     legend.position = "bottom",
     legend.text = element_text(size = 6),
@@ -265,4 +265,6 @@ enrichment_dots_final <- (p_main + p_side) +
   )
 
 enrichment_dots_final
+
+ggsave("results/pregnancy_functional_enrichment.png", enrichment_dots_final, width = 21, height = 29.7, units = "cm")
 ```
