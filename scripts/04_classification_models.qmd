@@ -1,0 +1,661 @@
+---
+title: "Untitled"
+format: html
+---
+
+
+# Set up
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(HDAnalyzeR)
+library(mbaRtools)
+library(tidymodels)
+library(embed)
+library(pheatmap)
+#source("scripts/functions/functions_visualization.R")
+
+# Data
+data_soma_wide <- read_tsv("../../Data/Somascan/processed/data_phase2_somalogic_curated_subset_20251031.tsv")
+data_olink <- read_tsv("../../Data/Olink/processed/data_phase2_HT_bridged_curated_subset_20251031.tsv")
+meta_soma <- read_tsv("../../Data/Somascan/processed/meta_phase2_somalogic_elod_20251028.tsv")
+meta <- read_tsv("../../Data/metadata/meta_phase2_hpav25_20251031.tsv")
+
+# Soma data in long format
+data_soma <- 
+  data_soma_wide |> 
+  pivot_longer(names_to = "AptName", values_to = "log2RFU", cols = -DAid) |> 
+  left_join(meta_soma |> 
+    select(AptName, Assay = EntrezGeneSymbol), by = "AptName")
+```
+
+# Import results
+
+```{r}
+model_olink <- readRDS("data/processed/ml_olink.rds")
+model_soma <- readRDS("data/processed/ml_soma.rds")
+model_combined <- readRDS("data/processed/ml_combined.rds")
+```
+
+# Feature importance
+
+```{r}
+# Number of diseases
+model_olink$important_proteins |> distinct(term) |> nrow()
+model_soma$important_proteins |> distinct(term) |> nrow()
+model_combined$important_proteins |> distinct(term)|> nrow()
+
+model_olink$important_proteins |> count(class) |> arrange(n)
+model_soma$important_proteins |>  count(class) |> arrange(n)
+model_combined$important_proteins |>  count(class) |> arrange(n)
+
+model_combined$important_proteins |> distinct(term)|> nrow()
+
+
+```
+
+
+## Heatmap
+
+```{r}
+# model_olink$important_proteins |> 
+#     arrange(-abs(estimate)) |> 
+#     head(100)  |> 
+#     select(-penalty) |> 
+#     pivot_wider(names_from = term, values_from = estimate, values_fill = 0) |> 
+#     column_to_rownames("class") |> 
+#     pheatmap(clustering_method = "ward.D2")
+
+
+# model_soma$important_proteins |> 
+#     arrange(-abs(estimate)) |> 
+#     head(100)  |> 
+#     select(-penalty) |> 
+#     pivot_wider(names_from = term, values_from = estimate, values_fill = 0) |> 
+#     column_to_rownames("class") |> 
+#     pheatmap(clustering_method = "ward.D2")
+
+model_combined$important_proteins |> 
+    arrange(-abs(estimate)) |> 
+    head(100)  |> 
+    select(-penalty) |> 
+    pivot_wider(names_from = term, values_from = estimate, values_fill = 0) |> 
+    column_to_rownames("class") |> 
+    pheatmap(clustering_method = "ward.D2")
+
+model_combined$important_proteins |> 
+    left_join(data_soma |> distinct(term = AptName, Assay)) |> 
+    mutate(term = ifelse(grepl("seq", term), Assay, term)) |> 
+    select(-Assay, -penalty) |> 
+    count(term) |> 
+    arrange(-n)
+
+
+proteins_disease <- 
+    model_combined$important_proteins |> 
+    left_join(data_soma |> distinct(term = AptName, Assay)) |> 
+    mutate(term = ifelse(grepl("seq", term), Assay, term)) |> 
+    select(-Assay, -penalty) |> 
+    group_by(class) |> 
+    top_n(5, abs(estimate)) |> 
+    ungroup()
+
+library(tidygraph)
+library(ggraph)
+
+set.seed(213)
+tbl_graph <- 
+  proteins_disease %>%
+  select(term, class, estimate) %>% 
+  as_tbl_graph() 
+
+tbl_graph %>% 
+  activate(nodes) %>% 
+  #mutate(text_color = case_when(name %in% levels$cancers_12 ~ "white",
+   #                             T ~ "black")) %>%
+  create_layout(layout = "nicely") %>%
+  ggraph() + 
+  geom_edge_link(color = "grey80", width = 1) +
+  geom_node_point() +
+  geom_node_text(aes(label = name), size = 3) +
+#   geom_node_point(data = . %>% 
+#                     filter(name %in% levels$cancers_12) ,
+#                   aes(color = name),
+#                   size = 10,
+#                   fill ="grey30",
+#                   shape = 21,
+#                   stroke = 3) +
+#   geom_node_point(data = . %>% 
+#                     filter(!name %in% levels$cancers_12) %>% 
+#                     left_join(prot_panel_up %>% 
+#                                 select(name = Protein, Overall),
+#                               by = "name"), 
+#                   aes(fill = Overall),
+#                   shape = 21,
+#                   size = 5,
+#                   color = "grey80",
+#                   stroke = 0) +
+#   scale_color_manual(values = palettes$alt_group[levels$cancers_12], 
+#                      guide = "none") +
+#   scale_fill_gradient(high = "grey30",low = "grey80") +
+#   ggnewscale::new_scale_color() +
+#   geom_node_text(aes(label = str_wrap(name, width = 10),
+#                      color = text_color),
+#                  lineheight = 0.8,
+#                  size = 2,
+#                  vjust = 0) +
+  scale_color_identity() +
+  theme_void() + 
+  coord_fixed() 
+
+ggsave(savepath("network_protein_panel.pdf"))
+
+```
+
+
+## Network
+
+```{r}
+
+```
+
+## Alluvial
+
+```{r}
+
+```
+
+# Confusion matrix
+
+```{r}
+
+exclude_diseases <- 
+   meta |> 
+  filter(DAid %in% data_olink$DAid) |> 
+    count(Class, Disease) |> 
+    arrange(n) |> 
+    filter(n < 45 | Class == "Healthy")
+
+resource_meta <- 
+    meta |> 
+    filter(!Disease %in% exclude_diseases$Disease)
+
+include_diseases <- 
+    resource_meta |> 
+    distinct(Disease, Class) |>
+    filter(!Disease %in% exclude_diseases$Disease) |> 
+    arrange(Class, Disease) |> 
+    pull(Disease)
+
+library(patchwork)
+p1 <- model_olink$confusion_matrix_plot 
+p2 <- model_soma$confusion_matrix_plot+ theme_hpa(axis_y = F)
+p3 <- model_combined$confusion_matrix_plot+ theme_hpa(axis_y = F)
+
+ggsave(savepath("cm.pdf"), w = 18, h = 7)
+
+library(ggplotify)
+plot_cm(model_combined$confusion_matrix, percentage = F)
+
+ggsave("results_cm.pdf", h = 10, w = 10)
+
+confusion_matrix <- model_combined$confusion_matrix
+plot_cm <- function(confusion_matrix,
+                    percentage = F) {
+  ann_row <-
+    meta |>
+    distinct(Class, Disease) |>
+    filter(Disease %in% include_diseases) |>
+    rename(`True class` = Class) |>
+    column_to_rownames("Disease")
+  
+  ann_col <-
+    meta |>
+    distinct(Class, Disease) |>
+    filter(Disease %in% include_diseases) |>
+    rename(`Predicted class` = Class) |>
+    column_to_rownames("Disease")
+  
+  
+  cm_dat <-
+    confusion_matrix$table |>
+    as.data.frame() |>
+    group_by(Truth) |>
+    mutate(
+      Truth = factor(Truth, levels = include_diseases),
+      Prediction = factor(Prediction, levels = include_diseases)
+    )
+  
+  if (percentage == F) {
+    dat <-
+      cm_dat |>
+      arrange(Truth, Prediction) |>
+      pivot_wider(names_from = Truth,
+                  values_from = Freq) |>
+      column_to_rownames("Prediction") |>
+      t() |>
+      as.data.frame()
+    
+    labels <-
+      cm_dat |>
+      mutate(Freq = ifelse(Freq > 0, Freq, ""),
+             Freq = as.character(Freq)) |>
+      arrange(Truth, Prediction) |>
+      pivot_wider(names_from = Truth,
+                  values_from = Freq) |>
+      column_to_rownames("Prediction") |>
+      t() |>
+      as.data.frame()
+    
+    title <-  "Confusion matrix (n)"
+    
+    
+  } else {
+    dat <-
+      cm_dat |>
+      mutate(Freq = round((Freq / sum(Freq)) * 100, 0)) |>
+      arrange(Truth, Prediction) |>
+      pivot_wider(names_from = Truth,
+                  values_from = Freq) |>
+      column_to_rownames("Prediction") |>
+      t() |>
+      as.data.frame()
+    
+    labels <-
+      cm_dat |>
+      group_by(Truth) |>
+      mutate(
+        Freq = round((Freq / sum(Freq)) * 100, 0),
+        Freq = ifelse(Freq > 10, Freq, ""),
+        Freq = as.character(Freq)
+      ) |>
+      arrange(Truth, Prediction) |>
+      pivot_wider(names_from = Truth,
+                  values_from = Freq) |>
+      column_to_rownames("Prediction") |>
+      t() |>
+      as.data.frame()
+    
+    title <- "Confusion matrix (%)"
+  }
+  
+  dat |>
+    pheatmap(
+      cluster_rows = F,
+      annotation_row = ann_row,
+      annotation_col = ann_col,
+      cellwidth = 9,
+      cellheight = 9,
+      annotation_colors = list("True class" = class_pal, "Predicted class" = class_pal),
+      color = c("white", heatmap_pal),
+      display_numbers = labels,
+      cluster_cols = F
+    ) |>
+    as.ggplot() +
+    coord_fixed() +
+    theme(plot.title = element_text(face = "bold", size = rel(1))) +
+    ggtitle(title)
+}
+
+## Heatmap - confusion matrix
+heatmap_pal <-
+  colorRampPalette(c("#FFF3E0",  "#FFCC80", "#B7410E"))(100)
+```
+
+# Probabilities
+
+```{r}
+
+diseases <- model_olink$predictions$Disease |> unique()
+
+combined <- map_df(diseases, function(disease) {
+model_olink$predictions |> 
+    filter(Disease == disease) |> 
+    select(DAid, Disease, paste0(".pred_", disease)) |> 
+    mutate(Model = "Olink") |> 
+    bind_rows(model_soma$predictions |> 
+    filter(Disease == disease) |> 
+    select(DAid, Disease, paste0(".pred_", disease)) |> 
+    mutate(Model = "SomaScan")) |> 
+     bind_rows(model_combined$predictions |> 
+    filter(Disease == disease) |> 
+    select(DAid, Disease, paste0(".pred_", disease)) |> 
+    mutate(Model = "Combined")) |> 
+    rename(Prediction = paste0(".pred_", disease))
+})
+
+
+
+library(ggbeeswarm)
+platform_pal <- c("Olink" = "#73B9D3", "SomaScan" = "#DB81C5", "Combined" = "#5B6FA8")
+
+ class_levels_ml <- c("Neurologic", "Cardiovascular", "Autoimmune", "Infection", "Metabolic", "Cancer")
+
+disease_levels_ml <- 
+    meta |> 
+    distinct(Disease, Class) |> 
+    filter(Class %in% class_levels_ml,
+    Disease %in% unique(combined$Disease)) |> 
+    mutate(Class = factor(Class, levels = class_levels_ml)) |> 
+    arrange(Class) |> 
+    pull(Disease)
+
+combined |> 
+    mutate(Disease = factor(Disease, levels = disease_levels_ml)) |> 
+    ggplot(aes(Model, Prediction, color = Model, fill = Model)) +
+    geom_quasirandom(size = 0.5) +
+    geom_boxplot(alpha = 0.2, outlier.color = NA) +
+    #geom_line(aes(group = DAid) , color = "grey") +
+    facet_wrap(~Disease, nrow = 1) +
+    scale_color_hpa(palette = "platform_pal") +
+    scale_fill_hpa(palette = "platform_pal") +
+    theme_hpa(axis_x = F)
+
+ggsave(savepath("pan-disease-prob.pdf"), h = 2, w = 14)
+
+
+combined |> 
+    mutate(Disease = factor(Disease, levels = disease_levels_ml)) |> 
+    ggplot(aes(Model, Prediction, color = Model, fill = Model)) +
+    geom_quasirandom(size = 0.5) +
+    geom_boxplot(alpha = 0.2, outlier.color = NA) +
+    #geom_line(aes(group = DAid) , color = "grey") +
+    facet_wrap(~Disease, nrow = 1) +
+    scale_color_hpa(palette = "platform_pal") +
+    scale_fill_hpa(palette = "platform_pal") +
+    theme_hpa(axis_x = F)
+
+ggsave(savepath("pan-disease-prob.pdf"), h = 2, w = 14)
+
+diseases <- c("Psoriasis", "Psoriatic arthritis", "Cervical cancer", "Cerebral venous thrombosis")
+
+combined |> 
+  filter(Disease %in% diseases) |> 
+    mutate(Disease = factor(Disease, levels = diseases)) |> 
+    ggplot(aes(Model, Prediction, color = Model, fill = Model)) +
+    geom_quasirandom(size = 0.5) +
+    geom_boxplot(alpha = 0.2, outlier.color = NA) +
+    #geom_line(aes(group = DAid) , color = "grey") +
+    facet_wrap(~Disease, nrow = 1) +
+    scale_color_hpa(palette = "platform_pal") +
+    scale_fill_hpa(palette = "platform_pal") +
+    theme_hpa(axis_x = F)
+
+ggsave(savepath("pan-disease-prob-examples-2.pdf"), h = 2, w = 6)
+```
+
+
+# top protein
+
+```{r}
+diseases <- c("Cervical cancer", "Cerebral venous thrombosis", "Psoriasis", "Psoriatic arthritis")
+top_proteins <-  
+
+  model_combined$important_proteins  |> 
+  group_by(class) |> 
+  top_n(abs(estimate), n = 1) |> 
+  filter(class %in% diseases) |> 
+  mutate(class = factor(class, levels = diseases)) |> 
+  arrange(class)
+
+
+disease_class_order <- c("Healthy", "Cardiovascular", "Metabolic", "Cancer", "Neurologic", "Autoimmune", "Infection")
+
+disease_order <- meta |> 
+  distinct(Disease, Class) |> 
+  mutate(Class = factor(Class, levels = disease_class_order)) |> 
+  arrange(Class)
+
+data_soma |> 
+  select(-Assay) |> 
+  rename(Assay = AptName, NPX = log2RFU) |> 
+  bind_rows(data_olink) |> 
+  filter(Assay %in% top_proteins$term) |> 
+  left_join(meta) |> 
+  mutate(Disease = factor(Disease, levels =disease_order$Disease ),
+  Assay = factor(Assay, levels = top_proteins$term)) |> 
+  ggplot(aes(Disease, NPX, color = Class, fill = Class)) +
+  geom_quasirandom(show.legend = F, size = 0.6) +
+  geom_boxplot(alpha = 0.2, outlier.color = NA, show.legend = F, color = "black") +
+  facet_wrap(~Assay, scales = "free_y", ncol = 1) +
+  scale_color_manual(values = class_pal) +
+  scale_fill_manual(values = class_pal) +
+  theme_hpa(angled = T) 
+ 
+ ggsave(savepath("test-examples.pdf"), h = 10, w = 6)
+```
+
+# Initialize
+
+```{r}
+hd_olink <- hd_initialize(data_olink, meta)
+hd_soma <- hd_initialize(data_soma, meta, var_name = "AptName", value_name = "log2RFU")
+```
+
+# Machine learning
+
+
+```{r}
+
+
+exclude_diseases <- 
+    hd_olink$metadata |> 
+    count(Class, Disease) |> 
+    arrange(n) |> 
+    filter(n < 45 | Class == "Healthy")
+
+meta_ml <- 
+    meta |> 
+    filter(!Disease %in% exclude_diseases$Disease)
+
+data_olink_ml <- 
+    data_olink |> 
+    filter(DAid %in% meta_ml$DAid)
+
+hd_olink_ml <- hd_initialize(data_olink_ml, meta_ml)
+
+hd_olink_ml <- hd_filter(hd_olink, variable = "Disease", values = exclude_diseases$Disease, flag = "r")
+
+split_olink <- hd_split_data(hd_olink_ml, 
+                           variable = "Disease", 
+                           ratio = 0.7, 
+                           seed = 213) 
+
+                       #    metadata_cols = c("Sex", "Age"))
+
+model_disease_olink <- hd_model_rreg(split_olink, 
+                           case = NULL, 
+                           cv_sets = 5, 
+                           grid_size = 1) #, 
+                          # palette = "cancers12",
+                          # verbose = FALSE)
+
+
+saveRDS(model_disease_olink, savepath("ml_olink_test2.rds"))
+
+model_disease_olink$roc_curve
+model_disease_olink$probability_plot
+model_disease_olink$features
+model_disease_olink$feat_imp_plot
+model_disease_olink$metrics$auc
+
+
+model_disease_olink$metrics$confusion_matrix |> autoplot() + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) 
+ggsave(savepath("olink_ml_prop.png"), h = 8, w = 8)
+model_disease_olink$metrics$confusion_matrix |> autoplot(type = "heatmap") + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) 
+ggsave(savepath("olink_ml_heat.png"), h = 8, w = 8)
+
+
+model_disease_olink$metrics$confusion_matrix |> autoplot() + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) 
+model_disease_olink$metrics$confusion_matrix |> autoplot(type = "heatmap") + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) 
+
+model_disease_olink$features |> 
+    filter(Importance > 0)
+
+model_disease_olink$feat_imp_plot +
+    theme(axis.text.y = element_text())
+
+model_disease_soma$feat_imp_plot +
+    theme(axis.text.y = element_text())
+
+# Feature plot
+ 
+ cm <- model_disease_olink$metrics$confusion_matrix
+
+ggplot(cm$data, aes(x = Prediction, y = Truth, fill = n)) +
+  geom_tile() +
+  geom_text(aes(label = n), color = "white") +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  labs(title = "Confusion Matrix")
+
+
+ feature_panel <- model_aml[["features"]] |>
+  filter(Scaled_Importance > 0.5) |>
+  mutate(Class = "AML") |>
+  bind_rows(model_gliom[["features"]] |>
+              filter(Scaled_Importance > 0.5) |>
+              mutate(Class = "GLIOM"),
+            model_ovc[["features"]] |>
+              filter(Scaled_Importance > 0.5) |>
+              mutate(Class = "OVC"))
+
+print(head(feature_panel))  # Preview of the feature panel
+
+hd_plot_feature_network(feature_panel,
+                        plot_color = "Scaled_Importance",
+                        class_palette = "cancers12")
+
+
+
+```
+
+## Soma
+
+```{r}
+exclude_diseases <- 
+    hd_soma$metadata |> 
+    count(Class, Disease) |> 
+    arrange(n) |> 
+    filter(n < 45 | Class == "Healthy")
+
+meta_ml <- 
+    meta |> 
+    filter(!Disease %in% exclude_diseases$Disease)
+
+data_soma_ml <- 
+    data_soma |> 
+    filter(DAid %in% meta_ml$DAid) |> select(DAid, Assay = AptName, NPX = log2RFU)
+
+hd_soma_ml <- hd_initialize(data_soma_ml, meta_ml)
+
+
+split_soma <- hd_split_data(hd_soma_ml, 
+                           variable = "Disease", 
+                           ratio = 0.7, 
+                           seed = 213) 
+
+                       #    metadata_cols = c("Sex", "Age"))
+
+model_disease_soma <- hd_model_rreg(split_soma, 
+                           case = NULL, 
+                           cv_sets = 5, 
+                           grid_size = 1) #, 
+                          # palette = "cancers12",
+                          # verbose = FALSE)
+
+
+
+saveRDS(model_disease_soma, savepath("ml_soma_test.rds"))
+
+model_disease_soma$roc_curve
+model_disease_soma$probability_plot
+model_disease_soma$features
+model_disease_soma$feat_imp_plot
+model_disease_soma$metrics$auc
+
+model_disease_soma$metrics$confusion_matrix |> autoplot() + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) 
+ggsave(savepath("soma_ml_prop.png"), h = 8, w = 8)
+model_disease_soma$metrics$confusion_matrix |> autoplot(type = "heatmap") + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) 
+ggsave(savepath("soma_ml_heat.png"), h = 8, w = 8)
+
+```
+
+## Combine
+
+```{r}
+data_combined_ml <- 
+    data_olink |> 
+    filter(DAid %in% meta_ml$DAid) |> 
+    bind_rows(    data_soma |> 
+    filter(DAid %in% meta_ml$DAid) |> select(DAid, Assay = AptName, NPX = log2RFU))
+
+hd_combined_ml <- hd_initialize(data_combined_ml, meta_ml)
+
+split_combined<- hd_split_data(hd_combined_ml, 
+                           variable = "Disease", 
+                           ratio = 0.7, 
+                           seed = 213) 
+
+                       #    metadata_cols = c("Sex", "Age"))
+
+model_disease_combined <- hd_model_rreg(split_combined, 
+                           case = NULL, 
+                           cv_sets = 5, 
+                           grid_size = 1) #, 
+                          # palette = "cancers12",
+                          # verbose = FALSE)
+
+saveRDS(model_disease_combined, savepath("ml_combined_test.rds"))
+
+model_disease_combined$roc_curve
+model_disease_combined$probability_plot
+model_disease_combined$features
+model_disease_combined$feat_imp_plot
+model_disease_combined$metrics$auc
+
+model_disease_combined$metrics$confusion_matrix |> autoplot() + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) 
+ggsave(savepath("combined_ml_prop.png"), h = 8, w = 8)
+model_disease_combined$metrics$confusion_matrix |> autoplot(type = "heatmap") + theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) 
+ggsave(savepath("combined_ml_heat.png"), h = 8, w = 8)
+
+
+```
+
+
+
+## Age
+
+
+```{r}
+
+hd_olink
+
+
+split_olink_age <- hd_split_data(hd_olink, variable = "Age", ratio = 0.8)
+
+model_olink_age <- hd_model_rreg(split_olink_age, 
+                           variable = "Age",
+                           case = NULL, 
+                           cv_sets = 5, 
+                           grid_size = 1,
+                           plot_title = c("rmse", "rsq", "features", "mixture"),
+                           verbose = TRUE)
+
+model_olink_age$final_workflow
+model_olink_age$comparison_plot
+model_olink_age$feat_imp_plot
+
+
+split_soma_age <- hd_split_data(hd_soma, variable = "Age", ratio = 0.8)
+
+model_soma_age <- hd_model_rreg(split_soma_age, 
+                           case = NULL, 
+                           cv_sets = 5, 
+                           grid_size = 15,
+                           plot_title = c("rmse", "rsq", "features", "mixture"),
+                           verbose = TRUE)
+
+```
