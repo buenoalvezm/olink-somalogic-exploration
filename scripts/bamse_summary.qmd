@@ -1,0 +1,232 @@
+# Pregnancy Biological Summary
+
+## Setup & Data
+
+```{r}
+library(readr)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(HDAnalyzeR)
+library(patchwork)
+
+select <- dplyr::select
+rename <- dplyr::rename
+```
+
+## Age analysis
+
+```{r}
+olink_de <- readRDS("data/MM_estimates_BAMSE_v2.rds") |> 
+  filter(term == "Age")
+
+soma_meta <- read_tsv("data/meta_phase2_somalogic_elod_20251028.tsv")
+soma_de <- readRDS("data/mm_fixed_effects_bamse_soma.rds") |> 
+  filter(term == "Age") |> 
+  left_join(soma_meta |> filter(Organism == "Human") |> select(Protein = EntrezGeneSymbol, Assay = AptName), by = "Assay") |> 
+  group_by(Protein) |>
+  arrange(desc(abs(estimate)), .by_group = TRUE) |>
+  slice_head(n = 1) |>
+  ungroup() |> 
+  select(-Assay) |> 
+  rename(Assay = Protein)
+
+olink_explore_1536 <- readRDS("data/olink_explore_1536.rds")
+```
+
+### Gene sets
+
+```{r}
+olink_explore <- olink_de |> 
+  filter(Assay %in% olink_explore_1536)
+
+olink_ht <- olink_de |> 
+  filter(!Assay %in% olink_explore_1536)
+
+soma <- soma_de |> 
+  filter(!Assay %in% olink_explore_1536)
+```
+
+### GSEA - Olink Explore
+
+```{r}
+olink_explore_obj <- list(
+  de_res = olink_explore |> rename(Feature = Assay)
+)
+class(olink_explore_obj) <- "hd_de"
+olink_explore_obj$de_res <- as_tibble(olink_explore_obj$de_res)
+enrichment_go <- hd_gsea(olink_explore_obj, database = "GO", ontology = "ALL", pval_lim = 0.05, ranked_by = "estimate")
+enrichment_kegg <- hd_gsea(olink_explore_obj, database = "KEGG", pval_lim = 0.05, ranked_by = "estimate")
+enrichment_reactome <- hd_gsea(olink_explore_obj, database = "Reactome", pval_lim = 0.05, ranked_by = "estimate")
+
+go_tbl <- as.data.frame(enrichment_go$enrichment@result) |>
+  mutate(Database = "GO")
+kegg_tbl <- as.data.frame(enrichment_kegg$enrichment@result) |>
+  mutate(Database = "KEGG")
+reactome_tbl <- as.data.frame(enrichment_reactome$enrichment@result) |>
+  mutate(Database = "Reactome")
+
+combined_olink_explore <- bind_rows(go_tbl, kegg_tbl, reactome_tbl) |> filter(p.adjust < 0.05)
+
+terms_olink_explore <- combined_olink_explore |>
+  group_by(Database) |>
+  arrange(p.adjust, .by_group = TRUE)
+
+write_csv(terms_olink_explore, "data/terms_olink_explore.csv")
+```
+
+### GSEA - Olink HT
+
+```{r}
+rm(enrichment_go)
+rm(enrichment_kegg)
+rm(enrichment_reactome)
+olink_ht_obj <- list(
+  de_res = olink_ht |> rename(Feature = Assay)
+)
+class(olink_ht_obj) <- "hd_de"
+olink_ht_obj$de_res <- as_tibble(olink_ht_obj$de_res)
+enrichment_go <- hd_gsea(olink_ht_obj, database = "GO", ontology = "ALL", pval_lim = 0.05, ranked_by = "estimate")
+enrichment_kegg <- hd_gsea(olink_ht_obj, database = "KEGG", pval_lim = 0.05, ranked_by = "estimate")
+enrichment_reactome <- hd_gsea(olink_ht_obj, database = "Reactome", pval_lim = 0.05, ranked_by = "estimate")
+
+go_tbl <- as.data.frame(enrichment_go$enrichment@result) |>
+  mutate(Database = "GO")
+kegg_tbl <- as.data.frame(enrichment_kegg$enrichment@result) |>
+  mutate(Database = "KEGG")
+reactome_tbl <- as.data.frame(enrichment_reactome$enrichment@result) |>
+  mutate(Database = "Reactome")
+
+combined_olink_ht <- bind_rows(go_tbl, kegg_tbl, reactome_tbl) |> filter(p.adjust < 0.05)
+
+terms_olink_ht <- combined_olink_ht |>
+  group_by(Database) |>
+  arrange(p.adjust, .by_group = TRUE)
+
+write_csv(terms_olink_ht, "data/terms_olink_ht.csv")
+```
+
+### GSEA - SomaScan
+
+```{r}
+rm(enrichment_go)
+rm(enrichment_kegg)
+rm(enrichment_reactome)
+soma_obj <- list(
+  de_res = soma |> rename(Feature = Assay)
+)
+class(soma_obj) <- "hd_de"
+soma_obj$de_res <- as_tibble(soma_obj$de_res)
+enrichment_go <- hd_gsea(soma_obj, database = "GO", ontology = "ALL", pval_lim = 0.05, ranked_by = "estimate")
+enrichment_kegg <- hd_gsea(soma_obj, database = "KEGG", pval_lim = 0.05, ranked_by = "estimate")
+enrichment_reactome <- hd_gsea(soma_obj, database = "Reactome", pval_lim = 0.05, ranked_by = "estimate")
+
+go_tbl <- as.data.frame(enrichment_go$enrichment@result) |>
+  mutate(Database = "GO")
+kegg_tbl <- as.data.frame(enrichment_kegg$enrichment@result) |>
+  mutate(Database = "KEGG")
+reactome_tbl <- as.data.frame(enrichment_reactome$enrichment@result) |>
+  mutate(Database = "Reactome")
+
+combined_soma <- bind_rows(go_tbl, kegg_tbl, reactome_tbl) |> filter(p.adjust < 0.05)
+
+terms_soma <- combined_soma |>
+  group_by(Database) |>
+  arrange(p.adjust, .by_group = TRUE)
+
+write_csv(terms_soma, "data/terms_soma.csv")
+```
+
+## Sex analysis
+
+```{r}
+olink_de <- readRDS("data/MM_estimates_BAMSE_v2.rds") |> 
+  filter(term == "SexM")
+
+soma_meta <- read_tsv("data/meta_phase2_somalogic_elod_20251028.tsv")
+soma_de <- readRDS("data/mm_fixed_effects_bamse_soma.rds") |> 
+  filter(term == "SexM") |> 
+  left_join(soma_meta |> filter(Organism == "Human") |> select(Protein = EntrezGeneSymbol, Assay = AptName), by = "Assay") |> 
+  group_by(Protein) |>
+  arrange(desc(abs(estimate)), .by_group = TRUE) |>
+  slice_head(n = 1) |>
+  ungroup() |> 
+  select(-Assay) |> 
+  rename(Assay = Protein)
+
+olink_explore_1536 <- readRDS("data/olink_explore_1536.rds")
+```
+
+### Gene sets
+
+```{r}
+olink_explore <- olink_de |> 
+  filter(Assay %in% olink_explore_1536)
+
+olink_ht <- olink_de |> 
+  filter(!Assay %in% olink_explore_1536)
+
+soma <- soma_de |> 
+  filter(!Assay %in% olink_explore_1536)
+```
+
+### GSEA - Olink Explore
+
+```{r}
+olink_explore_obj <- list(
+  de_res = olink_explore |> rename(Feature = Assay)
+)
+class(olink_explore_obj) <- "hd_de"
+olink_explore_obj$de_res <- as_tibble(olink_explore_obj$de_res)
+enrichment_go <- hd_gsea(olink_explore_obj, database = "GO", ontology = "ALL", pval_lim = 0.05, ranked_by = "estimate")
+enrichment_reactome <- hd_gsea(olink_explore_obj, database = "Reactome", pval_lim = 0.05, ranked_by = "estimate")
+
+go_tbl <- as.data.frame(enrichment_go$enrichment@result) |>
+  mutate(Database = "GO")
+reactome_tbl <- as.data.frame(enrichment_reactome$enrichment@result) |>
+  mutate(Database = "Reactome")
+
+combined_olink_explore <- bind_rows(go_tbl, reactome_tbl) |> filter(p.adjust < 0.05)
+
+terms_olink_explore <- combined_olink_explore |>
+  group_by(Database) |>
+  arrange(p.adjust, .by_group = TRUE)
+
+write_csv(terms_olink_explore, "data/terms_olink_explore_sex.csv")
+```
+
+### GSEA - Olink HT
+
+No enrichment in any of the 3 databases.
+
+### GSEA - SomaScan
+
+```{r}
+rm(enrichment_go)
+rm(enrichment_kegg)
+rm(enrichment_reactome)
+soma_obj <- list(
+  de_res = soma |> rename(Feature = Assay)
+)
+class(soma_obj) <- "hd_de"
+soma_obj$de_res <- as_tibble(soma_obj$de_res)
+enrichment_go <- hd_gsea(soma_obj, database = "GO", ontology = "ALL", pval_lim = 0.05, ranked_by = "estimate")
+enrichment_kegg <- hd_gsea(soma_obj, database = "KEGG", pval_lim = 0.05, ranked_by = "estimate")
+enrichment_reactome <- hd_gsea(soma_obj, database = "Reactome", pval_lim = 0.05, ranked_by = "estimate")
+
+go_tbl <- as.data.frame(enrichment_go$enrichment@result) |>
+  mutate(Database = "GO")
+kegg_tbl <- as.data.frame(enrichment_kegg$enrichment@result) |>
+  mutate(Database = "KEGG")
+reactome_tbl <- as.data.frame(enrichment_reactome$enrichment@result) |>
+  mutate(Database = "Reactome")
+
+combined_soma <- bind_rows(go_tbl, kegg_tbl, reactome_tbl) |> filter(p.adjust < 0.05)
+
+terms_soma <- combined_soma |>
+  group_by(Database) |>
+  arrange(p.adjust, .by_group = TRUE)
+
+write_csv(terms_soma, "data/terms_soma_sex.csv")
+```
