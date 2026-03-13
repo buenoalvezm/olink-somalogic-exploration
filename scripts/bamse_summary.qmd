@@ -39,13 +39,16 @@ olink_explore_1536 <- readRDS("data/olink_explore_1536.rds")
 
 ```{r}
 olink_explore <- olink_de |> 
-  filter(Assay %in% olink_explore_1536)
+  filter(Assay %in% olink_explore_1536) |> 
+  mutate(p.adj = p.adjust(p.value, method = "fdr"))
 
 olink_ht <- olink_de |> 
-  filter(!Assay %in% olink_explore_1536)
+  filter(!Assay %in% olink_explore_1536) |> 
+  mutate(p.adj = p.adjust(p.value, method = "fdr"))
 
 soma <- soma_de |> 
-  filter(!Assay %in% olink_explore_1536)
+  filter(!Assay %in% olink_explore_1536) |> 
+  mutate(p.adj = p.adjust(p.value, method = "fdr"))
 ```
 
 ### GSEA - Olink Explore
