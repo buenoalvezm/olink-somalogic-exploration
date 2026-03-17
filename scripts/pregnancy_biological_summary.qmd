@@ -10,6 +10,10 @@ library(tidyr)
 library(ggplot2)
 library(HDAnalyzeR)
 library(patchwork)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+library(stringr)
+library(GOSemSim)
 
 select <- dplyr::select
 rename <- dplyr::rename
@@ -184,6 +188,387 @@ top_terms_t3_t2 <- bind_rows(
   top_terms_olink_t3_t2 |> mutate(Platform = "Olink"),
   top_terms_soma_t3_t2 |> mutate(Platform = "SomaScan")
 )
+
+write_csv(top_terms_t2_t1, "data/pregnancy_terms_T1T2.csv")
+write_csv(top_terms_t3_t2, "data/pregnancy_terms_T2T3.csv")
+```
+
+```{r}
+terms_T1T2 <- read.csv("data/pregnancy_terms_T1T2.csv")
+terms_T2T3 <- read.csv("data/pregnancy_terms_T2T3.csv")
+
+top_terms <- bind_rows(terms_T1T2, terms_T2T3) |> 
+  distinct(Description, .keep_all = TRUE)
+
+# Filter top 50 proteins from both Olink and Soma by min p.value, 
+# breaking ties with the highest absolute t.ratio
+top50_olink <- de_olink |>
+  arrange(p.value, desc(abs(t.ratio))) |>
+  head(200)
+
+top50_soma <- de_soma |>
+  arrange(p.value, desc(abs(t.ratio))) |>
+  head(200)
+
+top_proteins <- unique(c(top50_olink$Protein, top50_soma$Protein))
+
+pathway_genes <- top_terms |>
+  select(Description, core_enrichment) |>
+  separate_rows(core_enrichment, sep = "/") |>
+  rename(Entrez = core_enrichment)
+
+# Convert Entrez IDs to Gene Symbols
+gene_symbols <- mapIds(org.Hs.eg.db, 
+                       keys = pathway_genes$Entrez, 
+                       column = "SYMBOL", 
+                       keytype = "ENTREZID", 
+                       multiVals = "first")
+
+pathway_genes$Symbol <- gene_symbols
+
+pathway_genes <- pathway_genes |>
+  filter(Symbol %in% top_proteins)
+
+enrichment_edges <- pathway_genes |>
+  mutate(value = 1) |>
+  distinct(Description, Symbol, value)
+mat_wide <- enrichment_edges |>
+  pivot_wider(names_from = Symbol, values_from = value, values_fill = 0) |>
+  as.data.frame()
+rownames(mat_wide) <- mat_wide$Description
+enrichment_matrix <- as.matrix(mat_wide[, -1])
+
+# Clustering
+row_clust <- hclust(dist(enrichment_matrix), method = "complete")
+col_clust <- hclust(dist(t(enrichment_matrix)), method = "complete")
+row_levels <- rownames(enrichment_matrix)[row_clust$order]
+col_levels <- colnames(enrichment_matrix)[col_clust$order]
+
+plot_data <- expand.grid(
+  Description = row_levels,
+  Symbol = col_levels,
+  stringsAsFactors = FALSE
+)
+
+plot_data <- plot_data |>
+  mutate(Description = str_wrap(Description, width = 50)) |>
+  left_join(enrichment_edges, by = c("Description", "Symbol")) |>
+  mutate(value = ifelse(is.na(value), 0, value)) |>
+  mutate(
+    Description = factor(Description, levels = str_wrap(row_levels, width = 50)),
+    Symbol = factor(Symbol, levels = col_levels)
+  )
+
+# Base Heatmap
+p_heatmap <- ggplot(plot_data, aes(x = Symbol, y = Description, fill = factor(value))) +
+  geom_tile(color = "white", size = 0.2) +
+  scale_fill_manual(values = c("0" = "#f0f0f0", "1" = "#B2182B"), 
+                    labels = c("0" = "Absent", "1" = "Enriched"),
+                    name = "Protein Status") +
+  theme_minimal(base_size = 10) +
+  theme(
+    axis.text.x = element_text(size = 6, angle = 90, hjust = 1, vjust = 0.5),
+    axis.text.y = element_text(size = 6, lineheight = 0.7, vjust = 0.5),
+    axis.title = element_blank(),
+    legend.position = "bottom",
+    panel.grid = element_blank()
+  )
+
+# Row annotation early vs late pregnancy
+n_terms <- length(row_levels)
+annot_data <- data.frame(Description = row_levels, y_idx = 1:n_terms) |>
+  mutate(
+    in_T1T2 = Description %in% top20_T1T2$Description,
+    in_T2T3 = Description %in% top20_T2T3$Description
+  )
+
+bar_dots <- annot_data |>
+  rowwise() |>
+  mutate(x_vals = list(
+    unique(c(
+      if(in_T1T2) c(1, 2) else numeric(0),
+      if(in_T2T3) c(2, 3) else numeric(0)
+    ))
+  )) |>
+  unnest(x_vals) |>
+  rename(x = x_vals) |>
+  mutate(
+    fill = case_when(
+      x == 1 ~ "#CDDBCD",
+      x == 2 ~ "#DFC688", 
+      x == 3 ~ "#C88A6B"
+    )
+  ) |>
+  ungroup()
+
+p_side <- ggplot(bar_dots, aes(x = x, y = y_idx)) +
+  geom_line(aes(group = y_idx), color = "grey80", linewidth = 0.8, lineend = "round") +
+  geom_point(aes(fill = fill), shape = 21, color = "white", size = 3, stroke = 0.1) +
+  scale_fill_identity() +
+  scale_x_continuous(
+    limits = c(0.5, 3.5), 
+    position = "top"
+  ) +
+  scale_y_continuous(limits = c(1, n_terms), expand = expansion(add = 0.6)) +
+  theme_void() +
+  theme(
+    axis.text.x = element_blank(),
+    plot.margin = margin(5, 5, 5, 2),
+  )
+
+# Protein Olink vs SomaScan annotation
+de_olink <- de_olink |> mutate(FDR = p.adjust(p.value, method = "fdr"))
+de_soma  <- de_soma  |> mutate(FDR = p.adjust(p.value, method = "fdr"))
+
+sig_olink <- de_olink |> filter(FDR < 0.05) |> pull(Protein) |> unique()
+sig_soma  <- de_soma  |> filter(FDR < 0.05) |> pull(Protein) |> unique()
+
+col_annot <- data.frame(Symbol = factor(col_levels, levels = col_levels)) |>
+  mutate(
+    in_olink = Symbol %in% sig_olink,
+    in_soma  = Symbol %in% sig_soma,
+    Platform = case_when(
+      in_olink & in_soma ~ "Both",
+      in_olink           ~ "Olink",
+      in_soma            ~ "Soma",
+      TRUE               ~ "Not Sig"
+    )
+  ) |>
+  mutate(Platform = factor(Platform, levels = c("Olink", "Soma", "Both", "Not Sig")))
+
+p_top <- ggplot(col_annot, aes(x = Symbol, y = 1, fill = Platform)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  scale_fill_manual(
+    values = c("Olink" = "#6FC2EE", "Soma" = "#D82F88", "Both" = "#312F7C"),
+    drop = FALSE,
+    name = "Significant In:"
+  ) +
+  scale_x_discrete(expand = c(0, 0)) + 
+  scale_y_continuous(expand = c(0, 0)) +
+  theme_void() +
+  theme(
+    legend.position = "top",
+    legend.title = element_text(face = "bold", size = 10),
+    legend.text = element_text(size = 9),
+    legend.key.size = unit(0.4, "cm"),
+    plot.margin = margin(5, 2, 2, 5)
+  )
+
+layout_design <- "
+A#
+BC
+"
+
+final_plot_with_top <- p_top + p_heatmap + p_side +
+  plot_layout(
+    design = layout_design,
+    widths = c(10, 0.5),
+    heights = c(0.2, 10)
+  )
+
+ggsave("results/pregnancy_gsea_detailed_heatmap.pdf", width = 15, height = 10)
+final_plot_with_top
+```
+
+```{r}
+terms_T1T2 <- read.csv("data/pregnancy_terms_T1T2.csv") |> mutate(Comparison = "T1 to T2")
+terms_T2T3 <- read.csv("data/pregnancy_terms_T2T3.csv") |> mutate(Comparison = "T2 to T3")
+
+terms_T1T2 <- terms_T1T2 |> mutate(Platform = ifelse(Platform == "Soma", "SomaScan", Platform))
+terms_T2T3 <- terms_T2T3 |> mutate(Platform = ifelse(Platform == "Soma", "SomaScan", Platform))
+
+top_terms <- bind_rows(terms_T1T2, terms_T2T3)
+
+# Separate GO terms from non-GO terms
+go_terms <- top_terms |> filter(grepl("^GO:", ID))
+non_go_terms <- top_terms |> filter(!grepl("^GO:", ID))
+
+term_to_rep <- list()
+
+for (ont in unique(go_terms$ONTOLOGY)) {
+  if (is.na(ont)) next
+  
+  ont_terms <- go_terms |> filter(ONTOLOGY == ont)
+  
+  if (nrow(ont_terms) <= 1) {
+    for (i in 1:nrow(ont_terms)) {
+      term_to_rep[[ont_terms$Description[i]]] <- ont_terms$Description[i]
+    }
+    next
+  }
+  
+  # Calculate semantic similarity
+  hsGO <- godata('org.Hs.eg.db', ont = ont)
+  sim_mat <- termSim(ont_terms$ID, ont_terms$ID, semData = hsGO, method = "Wang")
+  
+  dist_mat <- as.dist(1 - sim_mat)
+  hc <- hclust(dist_mat, method = "average")
+  
+  # Group terms with distance < 0.4
+  clusters <- cutree(hc, h = 0.4) 
+  
+  ont_terms$cluster <- clusters
+
+  rep_mapping <- ont_terms |> 
+    group_by(cluster) |> 
+    mutate(Rep_Description = Description[which.min(p.adjust)]) |>
+    ungroup()
+  
+  for (i in 1:nrow(rep_mapping)) {
+    term_to_rep[[rep_mapping$Description[i]]] <- rep_mapping$Rep_Description[i]
+  }
+}
+
+# Group GO terms by their semantic representative
+go_grouped <- go_terms |>
+  rowwise() |>
+  mutate(Description = term_to_rep[[Description]]) |>
+  ungroup()
+
+all_grouped_terms <- bind_rows(go_grouped, non_go_terms)
+
+# Define a dictionary of pathways you want to manually group together
+manual_groups <- c(
+  # Sphingolipids
+  "Glycosphingolipid catabolism" = "Sphingolipid & Glycosphingolipid metabolism",
+  "Glycosphingolipid metabolism" = "Sphingolipid & Glycosphingolipid metabolism",
+  "Sphingolipid metabolism"      = "Sphingolipid & Glycosphingolipid metabolism",
+  
+  # ECM & Adhesion
+  "Extracellular matrix organization"        = "ECM organization & Integrin interactions",
+  "extracellular matrix organization"        = "ECM organization & Integrin interactions",
+  "collagen-containing extracellular matrix" = "ECM organization & Integrin interactions",
+  "ECM proteoglycans"                        = "ECM organization & Integrin interactions",
+  "ECM-receptor interaction"                 = "ECM organization & Integrin interactions",
+  "Non-integrin membrane-ECM interactions"   = "ECM organization & Integrin interactions",
+  "Cell adhesion molecule (CAM) interaction" = "ECM organization & Integrin interactions",
+  "Focal adhesion"                           = "ECM organization & Integrin interactions",
+  "Integrin cell surface interactions"       = "ECM organization & Integrin interactions",
+  "Integrin signaling"                       = "ECM organization & Integrin interactions",
+  
+  # Elastic Fibers
+  "Elastic fibre formation"                  = "Elastic fibre formation & associated molecules",
+  "Molecules associated with elastic fibres" = "Elastic fibre formation & associated molecules",
+  
+  # Complement System
+  "Complement cascade"               = "Complement cascade & triggering",
+  "Initial triggering of complement" = "Complement cascade & triggering",
+  
+  # Glycans and GAGs
+  "Glycosaminoglycan degradation"          = "Glycan & GAG metabolism/degradation",
+  "HS-GAG degradation"                     = "Glycan & GAG metabolism/degradation",
+  "Other glycan degradation"               = "Glycan & GAG metabolism/degradation",
+  "Various types of N-glycan biosynthesis" = "Glycan & GAG metabolism/degradation",
+  
+  # Splicing
+  "Spliceosome"                   = "mRNA Splicing & Spliceosome",
+  "mRNA Splicing - Major Pathway" = "mRNA Splicing & Spliceosome",
+  
+  # Peptide Hormones
+  "Peptide hormone biosynthesis" = "Peptide hormone biosynthesis & response",
+  "response to peptide hormone"  = "Peptide hormone biosynthesis & response",
+  
+  # Post-translational modifications
+  "Post-translational protein modification"    = "Post-translational protein modification/phosphorylation",
+  "Post-translational protein phosphorylation" = "Post-translational protein modification/phosphorylation",
+  
+  # Receptors and Cytokines
+  "Cytokine-cytokine receptor interaction"    = "Cytokine & Receptor ligand interactions",
+  "Neuroactive ligand-receptor interaction"   = "Cytokine & Receptor ligand interactions",
+  "receptor ligand activity"                  = "Cytokine & Receptor ligand interactions",
+  "transmembrane signaling receptor activity" = "Cytokine & Receptor ligand interactions"
+)
+
+all_grouped_terms <- all_grouped_terms |>
+  mutate(Description = if_else(Description %in% names(manual_groups), 
+                               unname(manual_groups[Description]), 
+                               Description))
+
+merged_data <- all_grouped_terms |>
+  group_by(Description, Comparison, Platform) |>
+  summarise(
+    NES = mean(NES),
+    p.adjust = min(p.adjust),
+    .groups = "drop"
+  )
+
+pal_time <- c("T1" = "#CDDBCD", "T2" = "#DFC688", "T3" = "#C88A6B")
+pal_platform <- c("Olink" = "#6FC2EE", "SomaScan" = "#D82F88")
+
+terms_t2 <- merged_data |> filter(Comparison == "T1 to T2") |> pull(Description) |> unique()
+terms_t3 <- merged_data |> filter(Comparison == "T2 to T3") |> pull(Description) |> unique()
+
+merged_data <- merged_data |>
+  group_by(Description) |>
+  mutate(
+    Status = case_when(
+      Description %in% terms_t2 & Description %in% terms_t3 ~ "Shared",
+      Description %in% terms_t2 ~ "T1 to T2",
+      Description %in% terms_t3 ~ "T2 to T3"
+    ),
+    avg_nes = mean(NES)
+  ) |>
+  ungroup() |>
+  mutate(Description = reorder(Description, avg_nes))
+
+bar_dots <- merged_data |>
+  distinct(Description, Status) |>
+  mutate(y_idx = as.numeric(Description)) |>
+  reframe(
+    Description = Description,
+    y_idx = y_idx,
+    x = case_when(
+      Status == "T1 to T2" ~ list(c(1, 2)),
+      Status == "T2 to T3" ~ list(c(2, 3)),
+      Status == "Shared" ~ list(c(1, 2, 3))
+    ),
+    fill = case_when(
+      Status == "T1 to T2" ~ list(c(pal_time["T1"], pal_time["T2"])),
+      Status == "T2 to T3" ~ list(c(pal_time["T2"], pal_time["T3"])),
+      Status == "Shared" ~ list(c(pal_time["T1"], pal_time["T2"], pal_time["T3"]))
+    )
+  ) |>
+  unnest(cols = c(x, fill))
+
+n_terms <- length(unique(merged_data$Description))
+
+p_main <- ggplot(merged_data, aes(x = Description, y = NES, color = Platform)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey90") +
+  # To avoid dots perfectly overlapping if NES is exactly identical, we add a slight horizontal dodge
+  geom_point(aes(size = -log10(p.adjust), shape = Comparison), alpha = 0.8) +
+  coord_flip() +
+  scale_color_manual(values = pal_platform, guide = "none") +
+  scale_shape_manual(values = c("T1 to T2" = 17, "T2 to T3" = 16)) +
+  scale_x_discrete(labels = scales::label_wrap(65), expand = expansion(add = 0.6)) + 
+  labs(x = NULL, y = "Normalized Enrichment Score") +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 5, lineheight = 0.8), # Kept text small since there will be many terms
+    axis.title = element_text(size = 10, face = "bold"),
+    legend.position = "bottom",
+    legend.text = element_text(size = 8),
+    legend.title = element_text(size = 9, face = "bold"),
+    plot.margin = margin(5, 0, 5, 5),
+    panel.grid.minor = element_blank()
+  )
+
+p_side <- ggplot(bar_dots, aes(x = x, y = y_idx)) +
+  geom_line(aes(group = y_idx), color = "grey92", linewidth = 1.2, lineend = "round") +
+  geom_point(aes(fill = fill), shape = 21, color = "white", size = 3, stroke = 0.1) +
+  scale_fill_identity() +
+  scale_x_continuous(limits = c(0.5, 3.5)) +
+  scale_y_continuous(limits = c(1, n_terms), expand = expansion(add = 0.6)) +
+  theme_void() +
+  theme(
+    plot.margin = margin(5, 5, 5, 2)
+  )
+
+enrichment_dots_final <- (p_main + p_side) + 
+  plot_layout(widths = c(1, 0.12))
+
+enrichment_dots_final
+
+ggsave("results/pregnancy_functional_enrichment_updated.pdf", enrichment_dots_final, width = 15, height = 20, units = "cm", limitsize = FALSE)
 ```
 
 ```{r}
