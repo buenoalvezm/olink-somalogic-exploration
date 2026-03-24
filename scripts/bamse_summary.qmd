@@ -233,3 +233,91 @@ terms_soma <- combined_soma |>
 
 write_csv(terms_soma, "data/terms_soma_sex.csv")
 ```
+
+## Age and sex enrichment overview
+
+```{r}
+terms_olink_explore_sex <- read_csv("data/terms_olink_explore_sex.csv") |> mutate(Platform = "Olink", Covariate = "Sex")
+terms_olink_explore_age <- read_csv("data/terms_olink_explore.csv") |> mutate(Platform = "Olink", Covariate = "Age")
+terms_soma_sex <- read_csv("data/terms_soma_sex.csv") |> mutate(Platform = "SomaScan", Covariate = "Sex")
+terms_soma_age <- read_csv("data/terms_soma.csv") |> mutate(Platform = "SomaScan", Covariate = "Age")
+terms_olink_ht_age <- read_csv("data/terms_olink_ht.csv") |> mutate(Platform = "Olink", Covariate = "Age")
+
+merged_terms_raw <- bind_rows(
+  terms_olink_explore_sex, terms_olink_explore_age,
+  terms_soma_sex, terms_soma_age,
+  terms_olink_ht_age
+) |>
+  mutate(
+    Platform = factor(Platform, levels = c("Olink", "SomaScan")),
+    NES = if_else(is.na(NES), 0, NES),
+    sig_size = -log10(p.adjust),
+    sig_size = if_else(is.infinite(sig_size), 20, sig_size),
+    sig_size = if_else(is.na(sig_size), 1, sig_size)
+  ) |>
+  group_by(Covariate, Platform, Description) |>
+  slice_max(order_by = abs(NES), n = 1, with_ties = FALSE) |>
+  ungroup()
+
+target_terms <- merged_terms_raw |>
+  group_by(Covariate, Platform) |>
+  slice_max(order_by = abs(NES), n = 10, with_ties = FALSE) |>
+  ungroup() |>
+  distinct(Covariate, Description)
+
+merged_terms <- merged_terms_raw |>
+  inner_join(target_terms, by = c("Covariate", "Description")) |>
+  group_by(Covariate, Description) |>
+  mutate(avg_nes = mean(NES, na.rm = TRUE)) |>
+  ungroup() |>
+  mutate(Description = fct_reorder(Description, avg_nes))
+
+global_size_limits <- c(min(merged_terms$sig_size, na.rm = TRUE), max(merged_terms$sig_size, na.rm = TRUE))
+pal_platform <- c("Olink" = "#6FC2EE", "SomaScan" = "#D82F88")
+
+plot_enrichment <- function(data, plot_title) {
+  ggplot(data, aes(x = Description, y = NES, color = Platform)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey80") +
+    geom_point(aes(size = sig_size), alpha = 0.8) +
+    coord_flip() +
+    scale_color_manual(values = pal_platform, drop = FALSE) +
+    scale_size_continuous(
+      limits = global_size_limits, 
+      range = c(2, 7), 
+      name = expression(-log[10](p.adjust))
+    ) +
+    scale_x_discrete(labels = scales::label_wrap(55)) + 
+    labs(x = NULL, y = "Normalized Enrichment Score", title = plot_title) +
+    theme_minimal() +
+    theme(
+      axis.text.y = element_text(size = 8, lineheight = 0.8),
+      axis.title = element_text(size = 9, face = "bold"),
+      plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+      panel.grid.minor = element_blank()
+    )
+}
+
+p_age <- plot_enrichment(
+  merged_terms |> filter(Covariate == "Age") |> mutate(Description = fct_drop(Description)), 
+  "Age"
+)
+
+p_sex <- plot_enrichment(
+  merged_terms |> filter(Covariate == "Sex") |> mutate(Description = fct_drop(Description)), 
+  "Sex"
+) + 
+  guides(color = "none", size = "none")
+
+final_combined_plot <- (p_age | p_sex) + 
+  plot_layout(guides = "collect") & 
+  theme(
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.justification = "center",
+    legend.box.just = "center"
+  )
+
+print(final_combined_plot)
+
+ggsave("results/bamse_enrichment.png", final_combined_plot, width = 29.7, height = 21, units = "cm")
+```
