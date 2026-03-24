@@ -39,6 +39,18 @@ data_bamse_olink <-
   filter(DAid %in% meta_bamse$DAid)
 ```
 
+
+```{r}
+meta
+
+library(readxl)
+manifest <- read_excel("../../Data/metadata/samples_2025-05-12.xlsx")
+
+
+manifest |> 
+  filter(Disease == "Vasculitis") |> arrange(Age) |> View()
+```
+
 ## Best correlating aptamer per assay
 
 ```{r}
@@ -215,7 +227,6 @@ boxplots_age <-
 
 ```{r}
 fixed_effects_olink <- readRDS("data/processed/MM_estimates_BAMSE_v2.rds")
-
 
 dat_age_olink <-
   fixed_effects_olink |>
@@ -613,6 +624,41 @@ ggsave("results/Manuscript-figures/pie-comparison.pdf", h = 5, w = 5)
 ## Functional groups
 
 ```{r}
+
+hpa <- read_tsv("data/hpa_v25.tsv")
+
+selected_proteins <- 
+  dat |> 
+  filter(!is.na(Significance),
+        Significance != "Not significant in both")
+
+classes <- hpa |> 
+  select(Gene, `Protein class`) |> 
+  separate_rows(`Protein class`, sep = ", ") |> 
+  inner_join(selected_proteins, by = c("Gene" = "Assay")) |> 
+  count(Significance, `Protein class`) 
+
+top_classes <- 
+  classes |> 
+  ungroup() |> 
+  group_by(`Protein class`) |> 
+  summarise(total_n = sum(n)) |> 
+  arrange(-total_n) |> 
+  filter(total_n > 100)
+
+classes |> 
+  left_join(top_classes) |> 
+  filter(`Protein class` %in% top_classes$`Protein class`) |> 
+  arrange(-n) |> 
+  ggplot(aes(fct_reorder(`Protein class`, -total_n), n, fill = Significance)) +
+  geom_col(show.legend = F) +
+    scale_fill_manual(values = de_platform_pal) +
+  theme_hpa(angled = T) +
+  xlab("Protein class")
+
+ggsave("results/Manuscript-figures/bamse_protein_classes.pdf", h = 5, w = 6)
+
+
 
 ```
 
