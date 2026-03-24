@@ -453,6 +453,19 @@ offset_high <- offset_q3 + 1.5 * offset_iqr
 olink_de <- de_res_olink$de_res |> filter(adj.P.Val < 0.05) |> pull(Feature)
 soma_de  <- de_res_soma$de_res  |> filter(adj.P.Val < 0.05) |> pull(Feature)
 
+# Overlap in DE results
+olink_proteins <- olink_data$Feature
+soma_proteins <- soma_data$Feature_ID
+soma_proteins_clean <- str_remove(soma_proteins, " \\(SomaScan\\)$")
+overlap <- intersect(olink_proteins, soma_proteins_clean)
+only_olink <- setdiff(olink_proteins, soma_proteins_clean)
+only_soma <- setdiff(soma_proteins_clean, olink_proteins)
+print(list(
+  n_overlap = length(overlap),
+  n_only_olink = length(only_olink),
+  n_only_soma = length(only_soma)
+))
+
 # DE proteins for Olink and SomaScan combined in one matrix for PCoA, colored by Offset and shaped by outlier status
 olink_data <- hd_olink$data |>
   dplyr::select(DAid, all_of(olink_de)) |>
@@ -508,6 +521,43 @@ mds_plot <- ggplot(pcoa_scores, aes(x = MDS1, y = MDS2)) +
         plot.margin = margin(t = 5, r = 5, b = 5, l = 5))
 
 mds_plot
+
+disease_class <- c(
+  "Global" = "#E5E5E5",  # Add a color for Global
+  "Healthy" = "#C9B28F",
+  "Cardiovascular" = "#ED936B",
+  "Metabolic" = "#E0C59A",
+  "Cancer" = "#919FC7",
+  "Neurologic" = "#7DC0A6",
+  "Psychiatric" = "#7DC0A6",
+  "Infection" = "#F9DA56",
+  "Autoimmune" = "#DA8EC0"
+)
+
+pcoa_scores <- pcoa_scores |> 
+  inner_join(meta |> select(DAid, Class), by = "DAid")
+mds_plot_disease <- ggplot(pcoa_scores, aes(x = MDS1, y = MDS2)) +
+  stat_density_2d(aes(fill = ..level..), geom = "polygon", alpha = 0.1, show.legend = FALSE) +
+  geom_point(data = filter(pcoa_scores, Group == "Average"), 
+             aes(color = Class), alpha = 0.5, size = 1) +
+  geom_point(data = filter(pcoa_scores, Group != "Average"), 
+             aes(shape = Group, color = Class), size = 3, stroke = 1.5) +
+  # geom_text_repel(data = filter(pcoa_scores, Group != "Average"), 
+  #                 aes(label = paste0("Age:", Age, "\nOff:", round(Offset, 1))),
+  #                 size = 2, fontface = "bold", box.padding = 0.5) +
+  scale_color_manual(values = disease_class) +
+  scale_shape_manual(values = c("Acc. aging" = 17, "Dec. aging" = 16)) +
+  theme_hd() +
+  labs(x = "PC1", y = "PC2") + 
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 6),
+        legend.title = element_text(size = 8, face = "bold"),
+        axis.text = element_text(size = 6),
+        axis.title = element_text(size = 8, face = "bold"),
+        axis.text.x = element_text(hjust = 0.5),
+        plot.margin = margin(t = 5, r = 5, b = 5, l = 5))
+
+mds_plot_disease
 ```
 
 Combine all.
@@ -517,4 +567,127 @@ left_col <- de_validation_plot / final_plot / mds_plot + plot_layout(heights = c
 final_layout <- (left_col | enrichment_comb_plot) + plot_layout(widths = c(0.7, 0.3))
 
 ggsave("results/combined_figure.png", final_layout, width = 21, height = 29.7, units = "cm")
+```
+
+```{r}
+library(ggradar)
+library(scales)
+
+# 1. Identify outliers
+offset_iqr  <- IQR(metadat$Offset, na.rm = TRUE)
+offset_q1   <- quantile(metadat$Offset, 0.25, na.rm = TRUE)
+offset_q3   <- quantile(metadat$Offset, 0.75, na.rm = TRUE)
+offset_low  <- offset_q1 - 1.5 * offset_iqr
+offset_high <- offset_q3 + 1.5 * offset_iqr
+
+radar_meta <- metadat |>
+  mutate(Status = case_when(
+    Offset > offset_high ~ "Accelerated",
+    Offset < offset_low  ~ "Decelerated",
+    TRUE ~ "Normal"
+  )) |>
+  filter(!is.na(Status)) |>
+  mutate(Status = factor(Status, levels = c("Decelerated", "Normal", "Accelerated")))
+
+# 2. Combine data
+soma_map <- soma |> dplyr::select(AptName, Assay) |> distinct(AptName, .keep_all = TRUE)
+
+combined_data <- bind_rows(
+  hd_olink$data |> pivot_longer(-DAid, names_to = "Protein", values_to = "Value"),
+  hd_soma$data  |> pivot_longer(-DAid, names_to = "AptName", values_to = "Value") |> 
+    inner_join(soma_map, by = "AptName") |>
+    dplyr::select(DAid, Protein = Assay, Value)
+) |>
+  inner_join(radar_meta |> dplyr::select(DAid, Age, Status, Offset), by = "DAid")
+
+# 3. Remove age effect for ALL proteins
+age_corrected_data <- combined_data |>
+  group_by(Protein) |>
+  group_modify(~ {
+    normal_samples <- .x |> filter(Status == "Normal")
+    if(nrow(normal_samples) < 10) return(.x |> mutate(CorrectedValue = Value))
+    
+    model <- lm(Value ~ Age, data = normal_samples)
+    .x$AgePrediction <- predict(model, newdata = .x)
+    baseline <- coef(model)[1]
+    .x$CorrectedValue <- .x$Value - (.x$AgePrediction - baseline)
+    return(.x)
+  }) |>
+  ungroup()
+
+# 4. Calculate fold changes for ALL proteins
+all_fc <- age_corrected_data |>
+  group_by(Protein, Status) |>
+  summarise(MeanCorrected = mean(CorrectedValue, na.rm = TRUE), .groups = "drop") |>
+  group_by(Protein) |>
+  mutate(
+    NormalMean = MeanCorrected[Status == "Normal"],
+    FoldChange = MeanCorrected / NormalMean
+  ) |>
+  ungroup()
+
+# 5. Select MOST ROBUST proteins - high logFC AND low p-value
+# Calculate robustness score: combines effect size and significance
+robust_proteins <- de_compare |>
+  mutate(
+    # Robustness for Olink: |logFC| * -log10(adjP)
+    robustness_olink = abs(logFC_olink) * -log10(adjP_olink + 1e-300),
+    # Robustness for SomaScan: |logFC| * -log10(adjP)
+    robustness_soma = abs(logFC_soma) * -log10(adjP_soma + 1e-300),
+    # Replace NA with 0
+    robustness_olink = replace_na(robustness_olink, 0),
+    robustness_soma = replace_na(robustness_soma, 0)
+  )
+
+# Top 5 most robust from Olink (significant in Olink)
+top5_olink <- robust_proteins |>
+  filter(!is.na(adjP_olink) & adjP_olink < 0.05) |>
+  arrange(desc(robustness_olink)) |>
+  head(5) |>
+  pull(Feature)
+
+# Top 5 most robust from SomaScan (significant in SomaScan)
+top5_soma <- robust_proteins |>
+  filter(!is.na(adjP_soma) & adjP_soma < 0.05) |>
+  arrange(desc(robustness_soma)) |>
+  head(5) |>
+  pull(Feature)
+
+target_proteins <- unique(c(top5_olink, top5_soma))
+
+# 6. Prepare radar plot data
+radar_plot_data <- all_fc |>
+  filter(Protein %in% target_proteins) |>
+  dplyr::select(Status, Protein, FoldChange) |>
+  pivot_wider(names_from = Protein, values_from = FoldChange) |>
+  rename(group = Status)
+
+# 7. Create radar chart
+fc_values <- radar_plot_data |> select(-group) |> unlist()
+grid_min <- max(0, floor(min(fc_values, na.rm = TRUE) * 10) / 10)
+grid_max <- ceiling(max(fc_values, na.rm = TRUE) * 10) / 10
+
+radar_chart <- ggradar(
+  radar_plot_data,
+  grid.min = grid_min,
+  grid.mid = 1.0,
+  grid.max = grid_max,
+  values.radar = c(sprintf("%.1f", grid_min), "1.0", sprintf("%.1f", grid_max)),
+  group.colours = c("Decelerated" = "#6C6EB1", "Normal" = "grey60", "Accelerated" = "#B3584D"),
+  group.point.size = 3,
+  group.line.width = 1,
+  gridline.mid.colour = "grey",
+  legend.position = "bottom",
+  axis.label.size = 3,
+  grid.label.size = 4
+)
+
+print(radar_chart)
+ggsave("results/radar_chart.png", radar_chart, width = 12, height = 10, dpi = 300)
+
+# Show selected proteins with robustness scores
+robust_proteins |>
+  filter(Feature %in% target_proteins) |>
+  select(Feature, logFC_olink, adjP_olink, robustness_olink, logFC_soma, adjP_soma, robustness_soma) |>
+  arrange(desc(pmax(robustness_olink, robustness_soma)))
 ```

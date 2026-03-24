@@ -1,0 +1,647 @@
+```{r}
+library(readr)
+library(readxl)
+library(dplyr)
+library(igraph)
+library(ggraph)
+library(tidyr)
+library(ggplot2)
+library(ggforce)
+library(stringr)
+library(ggrepel)
+```
+
+```{r}
+obj <- readRDS("data/ml_combined.rds")
+
+features <- obj$important_proteins
+```
+
+```{r}
+# Sample metadata ----
+sample_meta <- read_excel("data/samples_2025-10-10.xlsx") |>
+  mutate(
+    Disease = ifelse(Cohort == "PARD", Diagnose, Disease),
+    Disease = ifelse(Disease %in% c("Healthy control", "healthy", "Control"), "Healthy", Disease),
+    Disease = case_when(Disease == "Pancreatic ductal adenocarcinoma" ~ "Pancreatic cancer",
+                        Diagnose == "OVC" ~  "Ovarian cancer",
+                        Diagnose == "BRC" ~ "Breast cancer",
+                        Diagnose == "LUNG" ~ "Lung cancer",
+                        Diagnose == "CRC" ~ "Colorectal cancer",
+                        Diagnose == "PRC" ~ "Prostate cancer",
+                        Diagnose == "4_random" ~ "BAMSE - visit 4",
+                        Diagnose == "8_random" ~ "BAMSE - visit 8",
+                        Diagnose == "16_random" ~ "BAMSE - visit 16",
+                        Diagnose == "24_random" ~ "BAMSE - visit 24",
+                        Diagnose == "pregnancy" ~ "Pregnancy",
+                        Diagnose == "PD" ~ "Parkinson's disease",
+                        T ~ Disease),
+    Class = case_when(Disease %in% c("Breast cancer", "Colorectal cancer", "Lung cancer", "Ovarian cancer", "Prostate cancer") ~ "Cancer",
+                      Disease == "Parkinson's disease" ~ "Neurologic",
+                      Cohort == "BAMS" ~ "Healthy",
+                      Cohort == "PREG" ~ "Healthy",
+                      Disease == "Healthy" ~ "Healthy",
+                      T ~ Class)
+    ) |>
+  select(DAid, Cohort, Class, Disease, Age, Sex, BMI)
+
+soma_meta <- read_tsv("data/meta_phase2_somalogic_elod_20251028.tsv")
+
+disease_class <- c(
+  "Global" = "#E5E5E5",  # Add a color for Global
+  "Healthy" = "#C9B28F",
+  "Cardiovascular" = "#ED936B",
+  "Metabolic" = "#E0C59A",
+  "Cancer" = "#919FC7",
+  "Neurologic" = "#7DC0A6",
+  "Psychiatric" = "#7DC0A6",
+  "Infection" = "#F9DA56",
+  "Autoimmune" = "#DA8EC0"
+)
+```
+
+```{r}
+features_scaled <- features |>
+  group_by(class) |>
+  mutate(
+    abs_estimate = abs(estimate),
+    scaled_estimate = (abs_estimate - min(abs_estimate)) / (max(abs_estimate) - min(abs_estimate))
+  ) |>
+  ungroup() |>
+  filter(scaled_estimate > 0.1)
+
+features_scaled <- features_scaled |>
+  mutate(
+    platform = if_else(startsWith(term, "seq."), "SomaScan", "Olink")
+  ) |>
+  left_join(
+    soma_meta |> select(AptName, EntrezGeneSymbol),
+    by = c("term" = "AptName")
+  ) |>
+  rename(Assay = EntrezGeneSymbol) |>
+  mutate(
+    Assay = if_else(platform == "Olink", term, Assay)
+  )
+
+# Count number of duplicated Assays per disease (both platforms)
+assay_platform_dupes <- features_scaled |>
+  distinct(Disease = class, Assay, platform) |>
+  group_by(Disease, Assay) |>
+  filter(n() > 1) |>
+  ungroup()
+
+dupe_counts <- assay_platform_dupes |>
+  count(Disease, name = "n_dupe_assays") |>
+  filter(n_dupe_assays > 0)
+
+ggplot(dupe_counts, aes(x = reorder(Disease, n_dupe_assays), y = n_dupe_assays)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    x = "Disease",
+    y = "Number of duplicated Assay names (Olink & SomaScan)",
+    title = "Diseases with Assays present in both platforms"
+  ) +
+  theme_minimal()
+
+# For each Assay, check if it appears in at least one Olink and at least one SomaScan disease
+assay_disease_platform <- features_scaled |>
+  distinct(Assay, Disease = class, platform)
+
+# Exclude (Assay, Disease) pairs that appear in both platforms for the same disease
+assay_disease_platform_nodup <- assay_disease_platform |>
+  group_by(Assay, Disease) |>
+  filter(n_distinct(platform) == 1) |>
+  ungroup()
+
+assay_platform_summary <- assay_disease_platform_nodup |>
+  group_by(Assay) |>
+  summarise(
+    n_olink = sum(platform == "Olink"),
+    n_soma = sum(platform == "SomaScan"),
+    .groups = "drop"
+  ) |>
+  filter(n_olink > 0, n_soma > 0)
+
+n_cross_platform_assays <- nrow(assay_platform_summary)
+n_cross_platform_assays
+```
+
+```{r}
+donut_width <- 0.12
+
+# 1. Annotate terms as unique/shared
+term_class_counts <- features_scaled |> count(term, name = "n_class")
+features_annot <- features_scaled |>
+  left_join(term_class_counts, by = "term")
+
+# 2. Unique terms per class
+unique_terms <- features_annot |> filter(n_class == 1)
+unique_counts <- unique_terms |> count(class, name = "n_unique")
+
+# 3. Shared terms: group by set of classes
+shared_terms <- features_annot |> filter(n_class > 1)
+shared_groups <- shared_terms |>
+  group_by(term) |>
+  summarise(classes = list(sort(unique(class))), .groups = "drop") |>
+  group_by(classes) |>
+  summarise(n_shared = n(), .groups = "drop")
+
+# 4. Build nodes with precomputed size
+# Rescale sizes to sensible point sizes
+class_nodes <- tibble(
+  name = unique(features_scaled$class),
+  type = "class",
+  label = stringr::str_replace_all(name, " ", "\n"),
+  size = 30
+)
+
+unique_nodes <- unique_counts |> mutate(
+  name = paste0(class, "_unique"),
+  type = "unique",
+  label = as.character(n_unique),
+  size = scales::rescale(n_unique, to = c(5, 14))
+)
+shared_nodes <- shared_groups |> mutate(
+  name = paste0("shared_", row_number()),
+  type = "shared",
+  label = as.character(n_shared),
+  size = scales::rescale(n_shared, to = c(5, 14))
+)
+
+nodes <- bind_rows(
+  class_nodes |> select(name, type, label, size),
+  unique_nodes |> select(name, type, label, size),
+  shared_nodes |> select(name, type, label, size)
+)
+
+edges_unique <- unique_counts |> mutate(
+  from = class,
+  to = paste0(class, "_unique")
+) |> select(from, to)
+
+edges_shared <- shared_nodes |>
+  mutate(classes = shared_groups$classes) |>
+  rowwise() |>
+  mutate(edge_list = list(tibble(from = classes, to = name))) |>
+  unnest(edge_list) |>
+  select(from, to)
+
+edges <- bind_rows(edges_unique, edges_shared)
+
+platform_colors <- c("Olink" = "#6FC2EE", "SomaScan" = "#D82F88")
+
+# Get class -> color mapping
+class_color_map <- features_scaled |>
+  distinct(class) |>
+  left_join(
+    sample_meta |> select(Disease, Class) |> distinct() |>
+      mutate(color = disease_class[Class]),
+    by = c("class" = "Disease")
+  ) |>
+  select(class, color) |> 
+  filter(!is.na(color))
+
+# Platform proportions for unique nodes
+unique_platform <- unique_terms |>
+  count(class, platform) |>
+  group_by(class) |>
+  mutate(prop = n / sum(n)) |>
+  ungroup()
+
+# Platform proportions for shared nodes
+shared_platform <- shared_terms |>
+  group_by(term) |>
+  mutate(classes = list(sort(unique(class)))) |>
+  ungroup() |>
+  left_join(
+    shared_nodes |> mutate(classes = shared_groups$classes) |> select(name, classes),
+    by = "classes"
+  ) |>
+  count(name, platform) |>
+  group_by(name) |>
+  mutate(prop = n / sum(n)) |>
+  ungroup()
+
+# Layout
+g <- graph_from_data_frame(edges, vertices = nodes, directed = FALSE)
+layout_coords <- ggraph::create_layout(g, layout = "stress")
+
+nodes_pos <- nodes |>
+  mutate(
+    x = layout_coords$x,
+    y = layout_coords$y
+  )
+
+# Unified size scale for non-class nodes based on count (label is count)
+count_vals <- as.numeric(nodes_pos |> filter(type != "class") |> pull(label))
+size_range <- c(3, 12)
+size_scale <- scales::rescale(count_vals, to = size_range)
+
+nodes_pos <- nodes_pos |>
+  mutate(
+    point_size = if_else(
+      type != "class",
+      scales::rescale(as.numeric(label), to = size_range,
+                      from = range(as.numeric(label[type != "class"]), na.rm = TRUE)),
+      NA_real_
+    )
+  )
+
+# Pie data for unique nodes
+pie_unique <- nodes_pos |>
+  filter(type == "unique") |>
+  mutate(class = str_remove(name, "_unique")) |>
+  left_join(unique_platform, by = "class", relationship = "many-to-many") |>
+  mutate(r = scales::rescale(as.numeric(label),
+                             to = c(0.15, 0.45),
+                             from = range(as.numeric(nodes_pos$label[nodes_pos$type != "class"]),
+                                          na.rm = TRUE)))
+
+# Pie data for shared nodes
+pie_shared <- nodes_pos |>
+  filter(type == "shared") |>
+  left_join(shared_platform, by = "name", relationship = "many-to-many") |>
+  mutate(r = scales::rescale(as.numeric(label),
+                             to = c(0.15, 0.45),
+                             from = range(as.numeric(nodes_pos$label[nodes_pos$type != "class"]),
+                                          na.rm = TRUE)))
+
+pie_data_all <- bind_rows(
+  pie_unique |> select(x, y, platform, prop, r, label, name),
+  pie_shared |> select(x, y, platform, prop, r, label, name)
+)
+
+# Split into single-platform (point) and multi-platform (pie)
+n_platforms <- pie_data_all |>
+  group_by(name) |>
+  summarise(n_platform = n_distinct(platform), .groups = "drop")
+
+pie_data_all <- pie_data_all |>
+  left_join(n_platforms, by = "name")
+
+pie_nodes <- pie_data_all |>
+  filter(n_platform > 1) |>
+  group_by(x, y) |>
+  mutate(
+    end_angle = cumsum(prop) * 2 * pi,
+    start_angle = lag(end_angle, default = 0)
+  ) |>
+  ungroup()
+
+point_nodes <- pie_data_all |>
+  filter(n_platform == 1) |>
+  distinct(x, y, platform, label, r)
+
+# Class ring
+class_ring <- nodes_pos |>
+  rename(class = name) |>
+  filter(type == "class") |>
+  left_join(class_color_map, by = "class") |>
+  mutate(color = replace_na(color, "#888888"))
+
+p <- ggraph(layout_coords) +
+  geom_edge_link(color = "grey60") +
+  # Class nodes: colored ring
+  geom_point(
+    data = class_ring,
+    aes(x = x, y = y, color = color),
+    size = 32, shape = 21, fill = "black", stroke = 3,
+    show.legend = FALSE
+  ) +
+  scale_color_identity() +
+  # Single-platform nodes: solid colored circle
+  geom_point(
+    data = point_nodes,
+    aes(x = x, y = y, fill = platform,
+        size = scales::rescale(r, to = size_range, from = c(0.15, 0.45))),
+    shape = 21, color = "white", stroke = 0.3,
+    inherit.aes = FALSE,
+    show.legend = FALSE
+  ) +
+  # Multi-platform nodes: donut charts with fixed ring width
+  geom_arc_bar(
+    data = pie_nodes,
+    aes(x0 = x, y0 = y, r0 = r - donut_width, r = r,
+        start = start_angle, end = end_angle, fill = platform),
+    color = "white", linewidth = 0.3,
+    inherit.aes = FALSE
+  ) +
+  # White circle in coordinate space to cover center of donuts exactly
+  geom_circle(
+    data = pie_nodes |> distinct(x, y, r),
+    aes(x0 = x, y0 = y, r = r - donut_width),
+    fill = "white", color = "white", linewidth = 0,
+    inherit.aes = FALSE
+  ) +
+  scale_fill_manual(values = platform_colors, name = "Platform") +
+  scale_size_identity() +
+  # Count labels in center of donut nodes
+  geom_text(
+    data = nodes_pos |> filter(type != "class") |>
+      semi_join(pie_nodes |> distinct(x, y), by = c("x", "y")),
+    aes(x = x, y = y, label = label),
+    size = 2.5, fontface = "bold", color = "black",
+    inherit.aes = FALSE
+  ) +
+  # Count labels above single-platform point nodes
+  geom_text(
+    data = point_nodes,
+    aes(x = x, y = y + r + 0.05, label = label),
+    size = 2.5, fontface = "bold", color = "black",
+    inherit.aes = FALSE
+  ) +
+  # Labels inside class nodes
+  geom_text(
+    data = nodes_pos |> filter(type == "class"),
+    aes(x = x, y = y, label = label),
+    size = 3, fontface = "bold", color = "white",
+    inherit.aes = FALSE
+  ) +
+  coord_fixed() +
+  theme_void()
+
+ggsave("results/feature_network.png", p, width = 16, height = 16, dpi = 300)
+p
+```
+
+Handle the combined features:
+
+```{r}
+donut_width <- 0.1
+platform_colors <- c("Olink" = "#6FC2EE", "SomaScan" = "#D82F88", "Both" = "#312F7C")
+
+# Step 1: Collapse platform per Assay+class
+features_collapsed <- features_scaled |>
+  group_by(class, Assay) |>
+  summarise(
+    platform = if (n_distinct(platform) > 1) "Both" else first(platform),
+    .groups = "drop"
+  )
+
+# Step 2: For each Assay, check if it appears as both Olink and SomaScan across ANY classes
+#         If so, mark ALL its entries as "Both"
+assay_cross_platform <- features_collapsed |>
+  group_by(Assay) |>
+  summarise(
+    has_olink = any(platform %in% c("Olink", "Both")),
+    has_soma  = any(platform %in% c("SomaScan", "Both")),
+    .groups = "drop"
+  ) |>
+  mutate(is_cross = has_olink & has_soma)
+
+features_collapsed <- features_collapsed |>
+  left_join(assay_cross_platform |> select(Assay, is_cross), by = "Assay") |>
+  mutate(platform = if_else(is_cross, "Both", platform)) |>
+  select(-is_cross)
+
+# 1. Annotate Assays as unique/shared across classes
+assay_class_counts <- features_collapsed |> count(Assay, name = "n_class")
+features_annot <- features_collapsed |>
+  left_join(assay_class_counts, by = "Assay")
+
+# 2. Unique Assays per class (appear in only one class)
+unique_assays <- features_annot |> filter(n_class == 1)
+unique_counts <- unique_assays |> count(class, name = "n_unique")
+
+# 3. Shared Assays: group by set of classes they appear in
+shared_assays <- features_annot |> filter(n_class > 1)
+shared_groups <- shared_assays |>
+  group_by(Assay) |>
+  summarise(classes = list(sort(unique(class))), .groups = "drop") |>
+  group_by(classes) |>
+  summarise(n_shared = n(), .groups = "drop")
+
+# 4. Build nodes
+class_nodes <- tibble(
+  name = unique(features_collapsed$class),
+  type = "class",
+  label = stringr::str_replace_all(name, " ", "\n"),
+  size = 30
+)
+
+unique_nodes <- unique_counts |> mutate(
+  name = paste0(class, "_unique"),
+  type = "unique",
+  label = as.character(n_unique),
+  size = scales::rescale(n_unique, to = c(5, 14))
+)
+
+shared_nodes <- shared_groups |> mutate(
+  name = paste0("shared_", row_number()),
+  type = "shared",
+  label = as.character(n_shared),
+  size = scales::rescale(n_shared, to = c(5, 14))
+)
+
+nodes <- bind_rows(
+  class_nodes |> select(name, type, label, size),
+  unique_nodes |> select(name, type, label, size),
+  shared_nodes |> select(name, type, label, size)
+)
+
+# 5. Build edges
+edges_unique <- unique_counts |> mutate(
+  from = class,
+  to = paste0(class, "_unique")
+) |> select(from, to)
+
+edges_shared <- shared_nodes |>
+  mutate(classes = shared_groups$classes) |>
+  rowwise() |>
+  mutate(edge_list = list(tibble(from = classes, to = name))) |>
+  unnest(edge_list) |>
+  select(from, to)
+
+edges <- bind_rows(edges_unique, edges_shared)
+
+# 6. Platform proportions for unique nodes
+unique_platform <- unique_assays |>
+  count(class, platform) |>
+  group_by(class) |>
+  mutate(prop = n / sum(n)) |>
+  ungroup()
+
+# 7. Platform proportions for shared nodes
+shared_platform <- shared_assays |>
+  group_by(Assay) |>
+  mutate(classes = list(sort(unique(class)))) |>
+  ungroup() |>
+  left_join(
+    shared_nodes |> mutate(classes = shared_groups$classes) |> select(name, classes),
+    by = "classes"
+  ) |>
+  count(name, platform) |>
+  group_by(name) |>
+  mutate(prop = n / sum(n)) |>
+  ungroup()
+
+# 8. Get class -> color mapping
+class_color_map <- features_scaled |>
+  distinct(class) |>
+  left_join(
+    sample_meta |> select(Disease, Class) |> distinct() |>
+      mutate(color = disease_class[Class]),
+    by = c("class" = "Disease")
+  ) |>
+  select(class, color) |>
+  filter(!is.na(color))
+
+# 9. Layout
+g <- graph_from_data_frame(edges, vertices = nodes, directed = FALSE)
+layout_coords <- ggraph::create_layout(g, layout = "fr")
+
+nodes_pos <- nodes |>
+  mutate(
+    x = layout_coords$x,
+    y = layout_coords$y
+  )
+
+# 10. Unified size scale
+count_range <- range(as.numeric(nodes_pos$label[nodes_pos$type != "class"]), na.rm = TRUE)
+r_range <- c(0.15, 0.45)
+size_range <- c(3, 12)
+
+nodes_pos <- nodes_pos |>
+  mutate(
+    point_size = if_else(
+      type != "class",
+      scales::rescale(as.numeric(label), to = size_range, from = count_range),
+      NA_real_
+    )
+  )
+
+# 11. Pie data for unique nodes
+pie_unique <- nodes_pos |>
+  filter(type == "unique") |>
+  mutate(class = str_remove(name, "_unique")) |>
+  left_join(unique_platform, by = "class", relationship = "many-to-many") |>
+  mutate(r = scales::rescale(as.numeric(label), to = r_range, from = count_range))
+
+# 12. Pie data for shared nodes
+pie_shared <- nodes_pos |>
+  filter(type == "shared") |>
+  left_join(shared_platform, by = "name", relationship = "many-to-many") |>
+  mutate(r = scales::rescale(as.numeric(label), to = r_range, from = count_range))
+
+pie_data_all <- bind_rows(
+  pie_unique |> select(x, y, platform, prop, r, label, name),
+  pie_shared |> select(x, y, platform, prop, r, label, name)
+)
+
+# 13. Split into single-platform (point) and multi-platform (donut)
+n_platforms <- pie_data_all |>
+  group_by(name) |>
+  summarise(n_platform = n_distinct(platform), .groups = "drop")
+
+pie_data_all <- pie_data_all |>
+  left_join(n_platforms, by = "name")
+
+pie_nodes <- pie_data_all |>
+  filter(n_platform > 1) |>
+  group_by(x, y) |>
+  mutate(
+    end_angle = cumsum(prop) * 2 * pi,
+    start_angle = lag(end_angle, default = 0)
+  ) |>
+  ungroup()
+
+point_nodes <- pie_data_all |>
+  filter(n_platform == 1) |>
+  distinct(x, y, platform, label, r)
+
+# 14. Class ring
+class_ring <- nodes_pos |>
+  rename(class = name) |>
+  filter(type == "class") |>
+  left_join(class_color_map, by = "class") |>
+  mutate(color = replace_na(color, "#888888"))
+
+# 15. Plot
+p <- ggraph(layout_coords) +
+  geom_edge_link(color = "grey60") +
+  # Class nodes: colored ring
+  geom_point(
+    data = class_ring,
+    aes(x = x, y = y, color = color),
+    size = 32, shape = 21, fill = "black", stroke = 5,
+    show.legend = FALSE
+  ) +
+  scale_color_identity() +
+  # Single-platform nodes: solid colored ring (no pieces)
+  geom_circle(
+    data = point_nodes,
+    aes(x0 = x, y0 = y, r = r, fill = platform),
+    color = "white", linewidth = 0.3,
+    inherit.aes = FALSE,
+    show.legend = FALSE
+  ) +
+  # White inner circle for single-platform nodes
+  geom_circle(
+    data = point_nodes,
+    aes(x0 = x, y0 = y, r = r - donut_width),
+    fill = "white", color = "white", linewidth = 0,
+    inherit.aes = FALSE,
+    show.legend = FALSE
+  ) +
+  # Multi-platform nodes: donut charts
+  geom_arc_bar(
+    data = pie_nodes,
+    aes(x0 = x, y0 = y, r0 = r - donut_width, r = r,
+        start = start_angle, end = end_angle, fill = platform),
+    color = "white", linewidth = 0.3,
+    inherit.aes = FALSE
+  ) +
+  # White inner circle for donut nodes
+  geom_circle(
+    data = pie_nodes |> distinct(x, y, r),
+    aes(x0 = x, y0 = y, r = r - donut_width),
+    fill = "white", color = "white", linewidth = 0,
+    inherit.aes = FALSE,
+    show.legend = FALSE
+  ) +
+  scale_fill_manual(values = platform_colors, name = "Platform") +
+  scale_size_identity() +
+  # Count labels in center of donut nodes
+  geom_text(
+    data = nodes_pos |> filter(type != "class") |>
+      semi_join(pie_nodes |> distinct(x, y), by = c("x", "y")),
+    aes(x = x, y = y, label = label),
+    size = 2.5, fontface = "bold", color = "black",
+    inherit.aes = FALSE
+  ) +
+  # Count labels in center of single-platform nodes
+  geom_text(
+    data = point_nodes,
+    aes(x = x, y = y, label = label),
+    size = 2.5, fontface = "bold", color = "black",
+    inherit.aes = FALSE
+  ) +
+  # Labels inside class nodes
+  geom_text(
+    data = nodes_pos |> filter(type == "class"),
+    aes(x = x, y = y, label = label),
+    size = 3, fontface = "bold", color = "white",
+    inherit.aes = FALSE
+  ) +
+  coord_fixed() +
+  theme_void()
+
+ggsave("results/feature_network_both.png", p, width = 16, height = 16, dpi = 300)
+p
+```
+
+
+```{r}
+write.csv(
+  nodes_pos |> select(name, label, type),
+  "results/cytoscape_nodes.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  edges |> rename(source = from, target = to) |> select(source, target),
+  "results/cytoscape_edges.csv",
+  row.names = FALSE
+)
+```
