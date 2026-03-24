@@ -1,0 +1,746 @@
+# Aging case study
+
+## Setup & Data
+
+```{r}
+library(readr)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(HDAnalyzeR)
+library(limma)
+library(tibble)
+library(patchwork)
+library(stringr)
+library(vegan)
+library(ggrepel)
+library(viridis)
+library(glmnet)
+library(ggbeeswarm)
+
+select <- dplyr::select
+rename <- dplyr::rename
+```
+
+```{r}
+# Olink -----
+olink <- read_tsv("data/data_phase2_HT_bridged_curated_subset_20251031.tsv") |>
+    select("DAid", "Assay", "UniProt", "Batch", "NPX", "LOD")
+
+# Soma -----
+soma_wide <- read_tsv("data/data_phase2_somalogic_curated_subset_20251031.tsv")
+soma_meta <- read_tsv("data/meta_phase2_somalogic_elod_20251028.tsv")
+
+soma <- soma_wide |>
+  pivot_longer(cols = -c("DAid"), names_to = "AptName", values_to = "Value") |>
+  left_join(soma_meta |> filter(Organism == "Human") |> select(AptName,eLOD, EntrezGeneSymbol), by = "AptName") |>
+  rename(Assay = EntrezGeneSymbol)
+
+# Sample metadata ----
+sample_meta <- read_excel("data/samples_2025-10-10.xlsx") |>
+  mutate(
+    Disease = ifelse(Cohort == "PARD", Diagnose, Disease),
+    Disease = ifelse(Disease %in% c("Healthy control", "healthy", "Control"), "Healthy", Disease),
+    Disease = case_when(Disease == "Pancreatic ductal adenocarcinoma" ~ "Pancreatic cancer",
+                        Diagnose == "OVC" ~  "Ovarian cancer",
+                        Diagnose == "BRC" ~ "Breast cancer",
+                        Diagnose == "LUNG" ~ "Lung cancer",
+                        Diagnose == "CRC" ~ "Colorectal cancer",
+                        Diagnose == "PRC" ~ "Prostate cancer",
+                        Diagnose == "4_random" ~ "BAMSE - visit 4",
+                        Diagnose == "8_random" ~ "BAMSE - visit 8",
+                        Diagnose == "16_random" ~ "BAMSE - visit 16",
+                        Diagnose == "24_random" ~ "BAMSE - visit 24",
+                        Diagnose == "pregnancy" ~ "Pregnancy",
+                        Diagnose == "PD" ~ "Parkinson's disease",
+                        T ~ Disease),
+    Class = case_when(Disease %in% c("Breast cancer", "Colorectal cancer", "Lung cancer", "Ovarian cancer", "Prostate cancer") ~ "Cancer",
+                      Disease == "Parkinson's disease" ~ "Neurologic",
+                      Cohort == "BAMS" ~ "Healthy",
+                      Cohort == "PREG" ~ "Healthy",
+                      Disease == "Healthy" ~ "Healthy",
+                      T ~ Class)
+    ) |>
+  select(DAid, Cohort, Class, Disease, Age, Sex, BMI)
+
+hpa_classification <- read_tsv("data/proteinatlas.tsv")
+age_model_split <- readRDS("data/current_split.rds")
+train <- age_model_split$data_train
+test <- age_model_split$data_test
+correct_vasculitis_age <- readRDS("data/AAV_DAid_Age.rds")
+
+train <- train |>
+  left_join(correct_vasculitis_age |> select(DAid, Age.at.sampling), by = "DAid") |>
+  mutate(Age = dplyr::coalesce(Age.at.sampling, Age)) |>
+  select(-Age.at.sampling)
+
+test <- test |>
+  left_join(correct_vasculitis_age |> select(DAid, Age.at.sampling), by = "DAid") |>
+  mutate(Age = dplyr::coalesce(Age.at.sampling, Age)) |>
+  select(-Age.at.sampling)
+
+soma_map <- soma |> distinct(AptName, Assay)
+```
+
+## DE
+
+Sets
+
+```{r}
+data_all <- rbind(train, test)
+sample_meta_filt <- sample_meta |> 
+  filter(DAid %in% data_all$DAid)
+
+healthy_ids <- sample_meta_filt |>
+  filter(Disease %in% c("Healthy", "Longevity")) |>
+  pull(DAid) |>
+  unique()
+
+healthy_young_dat <- data_all |> 
+  filter(DAid %in% healthy_ids, Age <= 70)
+
+healthy_old_dat <- data_all |> 
+  filter(DAid %in% healthy_ids, Age > 70)
+
+disease_ids <- sample_meta_filt |>
+  filter(!Disease %in% c("Healthy", "Longevity")) |>
+  pull(DAid) |>
+  unique()
+
+disease_old_dat <- data_all |> 
+  filter(DAid %in% disease_ids, Age > 70)
+```
+
+### Young vs Old Healthy
+
+Olink
+
+```{r}
+obj <- hd_initialize(
+  olink |> 
+    filter(DAid %in% c(healthy_young_dat$DAid, healthy_old_dat$DAid)),
+  sample_meta |>
+    filter(DAid %in% healthy_ids) |>
+    select(-Age) |>
+    left_join(data_all |> select(DAid, Age), by = "DAid") |>
+    mutate(class = if_else(Age > 70, "old", "young"))
+  )
+
+de_olink <- hd_de_limma(obj, variable = "class", case = "old", correct = c("Sex", "Age")) |> 
+  hd_plot_volcano()
+```
+
+SomaScan
+
+```{r}
+obj <- hd_initialize(
+  soma |> 
+    filter(DAid %in% c(healthy_young_dat$DAid, healthy_old_dat$DAid)),
+  sample_meta |>
+    filter(DAid %in% healthy_ids) |>
+    select(-Age) |>
+    left_join(data_all |> select(DAid, Age), by = "DAid") |>
+    mutate(class = if_else(Age > 70, "old", "young")),
+  var_name = "AptName",
+  value_name = "Value"
+  )
+
+de_soma <- hd_de_limma(obj, variable = "class", case = "old", correct = c("Sex", "Age")) 
+
+de_soma$de_res <- de_soma$de_res |> 
+  left_join(soma_map, by = c("Feature" = "AptName")) |>
+  filter(!is.na(Assay)) |>
+  group_by(Assay) |>
+  slice_min(order_by = adj.P.Val, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  select(-Feature) |>
+  rename(Feature = Assay)
+
+de_soma <- de_soma |> 
+  hd_plot_volcano()
+```
+
+Combine results
+
+```{r}
+olink_p <- de_olink$de_res |>
+  select(Feature, adj.P.Val) |>
+  rename(adj.P.Val_olink = adj.P.Val)
+
+soma_p <- de_soma$de_res |>
+  select(Feature, adj.P.Val) |>
+  rename(adj.P.Val_soma = adj.P.Val)
+
+merged_p <- full_join(olink_p, soma_p, by = "Feature") |>
+  mutate(
+    adj.P.Val_olink = replace_na(adj.P.Val_olink, 1),
+    adj.P.Val_soma  = replace_na(adj.P.Val_soma, 1)
+  )
+
+merged_p <- merged_p |>
+  mutate(
+    x = -log10(adj.P.Val_soma),
+    y = -log10(adj.P.Val_olink),
+    sig_olink = adj.P.Val_olink < 0.05,
+    sig_soma  = adj.P.Val_soma  < 0.05,
+    sig_cat = case_when(
+      sig_olink & sig_soma ~ "Significant in both",
+      sig_olink & !sig_soma ~ "Significant in Olink",
+      !sig_olink & sig_soma ~ "Significant in SomaScan",
+      TRUE ~ "Not significant in both"
+    ),
+    sig_cat = factor(sig_cat, levels = c(
+      "Significant in Olink",
+      "Significant in SomaScan",
+      "Significant in both",
+      "Not significant in both"
+    ))
+  )
+
+cols <- c(
+  "Significant in Olink" = "#6FC2EE",
+  "Significant in SomaScan" = "#D82F88",
+  "Significant in both" = "#312F7C",
+  "Not significant in both" = "#E5E5E5"
+)
+
+top10 <- merged_p |>
+  mutate(min_p = pmin(adj.P.Val_olink, adj.P.Val_soma, na.rm = TRUE)) |>
+  slice_min(order_by = min_p, n = 10)
+
+ggplot(merged_p, aes(x = x, y = y, color = sig_cat)) +
+  geom_point(alpha = 0.8, size = 1.8) +
+  geom_text_repel(
+    data = top10,
+    aes(label = Feature),
+    size = 3.2,
+    max.overlaps = 20
+  ) +
+  scale_color_manual(values = cols) +
+  labs(x = "-log10(pval_soma)", y = "-log10(pval_olink)", color = "Significance") +
+  theme_hd() + 
+  theme(axis.text.x = element_text(hjust = 0.5), legend.position = "none")
+
+ggsave("results/olink_soma_healthy_old_vs_healthy_young.pdf", width = 6, height = 6)
+```
+
+### Old Healthy vs Old Disease
+
+Olink
+
+```{r}
+obj <- hd_initialize(
+  olink |> 
+    filter(DAid %in% c(disease_old_dat$DAid, healthy_old_dat$DAid)),
+  sample_meta |>
+    filter(DAid %in% c(disease_old_dat$DAid, healthy_old_dat$DAid)) |>
+    select(-Age) |>
+    left_join(data_all |> select(DAid, Age), by = "DAid") |>
+    mutate(class = if_else(Disease %in% c("Healthy", "Longevity"), "Healthy", "Disease"))
+  )
+
+de_olink_disease <- hd_de_limma(obj, variable = "class", case = "Healthy", correct = c("Sex", "Age")) |> 
+  hd_plot_volcano()
+```
+
+SomaScan
+
+```{r}
+obj <- hd_initialize(
+  soma |> 
+    filter(DAid %in% c(disease_old_dat$DAid, healthy_old_dat$DAid)),
+  sample_meta |>
+    filter(DAid %in% c(disease_old_dat$DAid, healthy_old_dat$DAid)) |>
+    select(-Age) |>
+    left_join(data_all |> select(DAid, Age), by = "DAid") |>
+    mutate(class = if_else(Disease %in% c("Healthy", "Longevity"), "Healthy", "Disease")),
+  var_name = "AptName",
+  value_name = "Value"
+  )
+
+de_soma_disease <- hd_de_limma(obj, variable = "class", case = "Healthy", correct = c("Sex", "Age")) 
+
+de_soma_disease$de_res <- de_soma_disease$de_res |> 
+  left_join(soma_map, by = c("Feature" = "AptName")) |>
+  filter(!is.na(Assay)) |>
+  group_by(Assay) |>
+  slice_min(order_by = adj.P.Val, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  select(-Feature) |>
+  rename(Feature = Assay)
+
+de_soma_disease <- de_soma_disease |> 
+  hd_plot_volcano()
+```
+
+Combine results
+
+```{r}
+olink_p <- de_olink_disease$de_res |>
+  select(Feature, adj.P.Val) |>
+  rename(adj.P.Val_olink = adj.P.Val)
+
+soma_p <- de_soma_disease$de_res |>
+  select(Feature, adj.P.Val) |>
+  rename(adj.P.Val_soma = adj.P.Val)
+
+merged_p <- full_join(olink_p, soma_p, by = "Feature") |>
+  mutate(
+    adj.P.Val_olink = replace_na(adj.P.Val_olink, 1),
+    adj.P.Val_soma  = replace_na(adj.P.Val_soma, 1)
+  )
+
+merged_p <- merged_p |>
+  mutate(
+    x = -log10(adj.P.Val_soma),
+    y = -log10(adj.P.Val_olink),
+    sig_olink = adj.P.Val_olink < 0.05,
+    sig_soma  = adj.P.Val_soma  < 0.05,
+    sig_cat = case_when(
+      sig_olink & sig_soma ~ "Significant in both",
+      sig_olink & !sig_soma ~ "Significant in Olink",
+      !sig_olink & sig_soma ~ "Significant in SomaScan",
+      TRUE ~ "Not significant in both"
+    ),
+    sig_cat = factor(sig_cat, levels = c(
+      "Significant in Olink",
+      "Significant in SomaScan",
+      "Significant in both",
+      "Not significant in both"
+    ))
+  )
+
+cols <- c(
+  "Significant in Olink" = "#6FC2EE",
+  "Significant in SomaScan" = "#D82F88",
+  "Significant in both" = "#312F7C",
+  "Not significant in both" = "#E5E5E5"
+)
+
+top10 <- merged_p |>
+  mutate(min_p = pmin(adj.P.Val_olink, adj.P.Val_soma, na.rm = TRUE)) |>
+  slice_min(order_by = min_p, n = 10)
+
+ggplot(merged_p, aes(x = x, y = y, color = sig_cat)) +
+  geom_point(alpha = 0.8, size = 1.8) +
+  geom_text_repel(
+    data = top10,
+    aes(label = Feature),
+    size = 3.2,
+    max.overlaps = 20
+  ) +
+  scale_color_manual(values = cols) +
+  labs(x = "-log10(pval_soma)", y = "-log10(pval_olink)", color = "Significance") +
+  theme_hd() + 
+  theme(axis.text.x = element_text(hjust = 0.5), legend.position = "none")
+
+ggsave("results/olink_soma_healthy_vs_diseased_old.pdf", width = 6, height = 6)
+```
+
+
+### Healthy aging vs Diseased aging comparison
+
+```{r}
+# Olink: logFC comparison
+olink_logfc <- de_olink$de_res |>
+  select(Feature, logFC, adj.P.Val) |>
+  rename(logFC_olink = logFC, adj.P.Val_olink = adj.P.Val) |>
+  inner_join(
+    de_olink_disease$de_res |>
+      select(Feature, logFC, adj.P.Val) |>
+      rename(logFC_olink_disease = logFC, adj.P.Val_olink_disease = adj.P.Val),
+    by = "Feature"
+  ) |>
+  filter(adj.P.Val_olink < 0.05 | adj.P.Val_olink_disease < 0.05) |>
+  mutate(
+    max_abs_logFC = pmax(abs(logFC_olink), abs(logFC_olink_disease), na.rm = TRUE),
+    highlight = ifelse(abs(logFC_olink) > 0.5 | abs(logFC_olink_disease) > 0.5, "highlight", "other")
+  )
+
+top10_olink <- olink_logfc |>
+  slice_max(order_by = max_abs_logFC, n = 10)
+
+p_olink <- ggplot(olink_logfc, aes(x = logFC_olink, y = logFC_olink_disease, color = highlight)) +
+  geom_point(alpha = 0.8, size = 2) +
+  geom_text_repel(
+    data = top10_olink,
+    aes(x = logFC_olink, y = logFC_olink_disease, label = Feature),
+    size = 3.2,
+    max.overlaps = 20,
+    inherit.aes = FALSE
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 0.5) +
+  scale_color_manual(values = c("highlight" = "#6FC2EE", "other" = "#E5E5E5")) +
+  labs(
+    x = "logFC (Old Healthy VS Young Healthy, Olink)",
+    y = "logFC (Old Healthy vs Old Disease, Olink)",
+    title = "Olink: logFC comparison"
+  ) +
+  theme_hd() +
+  theme(legend.position = "none")
+
+# SomaScan: logFC comparison
+soma_logfc <- de_soma$de_res |>
+  select(Feature, logFC, adj.P.Val) |>
+  rename(logFC_soma = logFC, adj.P.Val_soma = adj.P.Val) |>
+  inner_join(
+    de_soma_disease$de_res |>
+      select(Feature, logFC, adj.P.Val) |>
+      rename(logFC_soma_disease = logFC, adj.P.Val_soma_disease = adj.P.Val),
+    by = "Feature"
+  ) |>
+  filter(adj.P.Val_soma < 0.05 | adj.P.Val_soma_disease < 0.05) |>
+  mutate(
+    max_abs_logFC = pmax(abs(logFC_soma), abs(logFC_soma_disease), na.rm = TRUE),
+    highlight = ifelse(abs(logFC_soma) > 0.5 | abs(logFC_soma_disease) > 0.5, "highlight", "other")
+  )
+
+top10_soma <- soma_logfc |>
+  slice_max(order_by = max_abs_logFC, n = 10)
+
+p_soma <- ggplot(soma_logfc, aes(x = logFC_soma, y = logFC_soma_disease, color = highlight)) +
+  geom_point(alpha = 0.8, size = 2) +
+  geom_text_repel(
+    data = top10_soma,
+    aes(x = logFC_soma, y = logFC_soma_disease, label = Feature),
+    size = 3.2,
+    max.overlaps = 20,
+    inherit.aes = FALSE
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 0.5) +
+  scale_color_manual(values = c("highlight" = "#D82F88", "other" = "#E5E5E5")) +
+  labs(
+    x = "logFC (Old Healthy VS Young Healthy, SomaScan)",
+    y = "logFC (Old Healthy vs Old Disease, SomaScan)",
+    title = "SomaScan: logFC comparison"
+  ) +
+  theme_hd() +
+  theme(legend.position = "none")
+
+# Side by side
+p_olink + p_soma
+
+ggsave("results/olink_soma_healthy_vs_diseased_aging.pdf", p_olink + p_soma, width = 10, height = 6)
+```
+
+### GSEA enrichment of results
+
+```{r}
+enrichment_go <- hd_gsea(de_olink, database = "GO", ontology = "ALL", pval_lim = 0.05, ranked_by = "logFC")
+enrichment_kegg <- hd_gsea(de_olink, database = "KEGG", pval_lim = 0.05, ranked_by = "logFC")
+enrichment_reactome <- hd_gsea(de_olink, database = "Reactome", pval_lim = 0.05, ranked_by = "logFC")
+
+go_tbl <- as.data.frame(enrichment_go$enrichment@result) |>
+  mutate(Database = "GO")
+kegg_tbl <- as.data.frame(enrichment_kegg$enrichment@result) |>
+  mutate(Database = "KEGG")
+reactome_tbl <- as.data.frame(enrichment_reactome$enrichment@result) |>
+  mutate(Database = "Reactome")
+
+combined_olink <- bind_rows(go_tbl, kegg_tbl, reactome_tbl) |> filter(p.adjust < 0.05)
+
+top_terms_olink <- combined_olink |>
+  group_by(Database) |>
+  arrange(p.adjust, .by_group = TRUE) |>
+  ungroup()
+```
+
+```{r}
+rm(enrichment_go)
+rm(enrichment_kegg)
+rm(enrichment_reactome)
+enrichment_go <- hd_gsea(de_soma, database = "GO", ontology = "ALL", pval_lim = 0.05, ranked_by = "logFC")
+enrichment_kegg <- hd_gsea(de_soma, database = "KEGG", pval_lim = 0.05, ranked_by = "logFC")
+enrichment_reactome <- hd_gsea(de_soma, database = "Reactome", pval_lim = 0.05, ranked_by = "logFC")
+
+go_tbl <- as.data.frame(enrichment_go$enrichment@result) |>
+  mutate(Database = "GO")
+kegg_tbl <- as.data.frame(enrichment_kegg$enrichment@result) |>
+  mutate(Database = "KEGG")
+reactome_tbl <- as.data.frame(enrichment_reactome$enrichment@result) |>
+  mutate(Database = "Reactome")
+
+combined_soma <- bind_rows(go_tbl, kegg_tbl, reactome_tbl) |> filter(p.adjust < 0.05)
+
+top_terms_soma <- combined_soma |>
+  group_by(Database) |>
+  arrange(p.adjust, .by_group = TRUE) |>
+  ungroup()
+```
+
+```{r}
+rm(enrichment_go)
+rm(enrichment_kegg)
+rm(enrichment_reactome)
+enrichment_go <- hd_gsea(de_olink_disease, database = "GO", ontology = "ALL", pval_lim = 0.05, ranked_by = "logFC")
+enrichment_reactome <- hd_gsea(de_olink_disease, database = "Reactome", pval_lim = 0.05, ranked_by = "logFC")
+
+go_tbl <- as.data.frame(enrichment_go$enrichment@result) |>
+  mutate(Database = "GO")
+reactome_tbl <- as.data.frame(enrichment_reactome$enrichment@result) |>
+  mutate(Database = "Reactome")
+
+combined_olink_disease <- bind_rows(go_tbl, reactome_tbl) |> filter(p.adjust < 0.05)
+
+top_terms_olink_disease <- combined_olink_disease |>
+  group_by(Database) |>
+  arrange(p.adjust, .by_group = TRUE) |>
+  ungroup()
+```
+
+```{r}
+rm(enrichment_go)
+rm(enrichment_kegg)
+rm(enrichment_reactome)
+enrichment_go <- hd_gsea(de_soma_disease, database = "GO", ontology = "ALL", pval_lim = 0.05, ranked_by = "logFC")
+enrichment_kegg <- hd_gsea(de_soma_disease, database = "KEGG", pval_lim = 0.05, ranked_by = "logFC")
+enrichment_reactome <- hd_gsea(de_soma_disease, database = "Reactome", pval_lim = 0.05, ranked_by = "logFC")
+
+go_tbl <- as.data.frame(enrichment_go$enrichment@result) |>
+  mutate(Database = "GO")
+kegg_tbl <- as.data.frame(enrichment_kegg$enrichment@result) |>
+  mutate(Database = "KEGG")
+reactome_tbl <- as.data.frame(enrichment_reactome$enrichment@result) |>
+  mutate(Database = "Reactome")
+
+combined_soma_disease <- bind_rows(go_tbl, kegg_tbl, reactome_tbl) |> filter(p.adjust < 0.05)
+
+top_terms_soma_disease <- combined_soma_disease |>
+  group_by(Database) |>
+  arrange(p.adjust, .by_group = TRUE) |>
+  ungroup()
+```
+
+```{r}
+top_terms <- bind_rows(
+  top_terms_olink |> mutate(Platform = "Olink"),
+  top_terms_soma |> mutate(Platform = "SomaScan")
+) |> arrange(p.adjust, .by_group = TRUE)
+
+top_terms_disease <- bind_rows(
+  top_terms_olink_disease |> mutate(Platform = "Olink"),
+  top_terms_soma_disease |> mutate(Platform = "SomaScan")
+) |> arrange(p.adjust, .by_group = TRUE)
+
+
+write_csv(top_terms, "data/aging_terms.csv")
+write_csv(top_terms_disease, "data/aging_terms_disease.csv")
+```
+
+Enrichment plot
+
+```{r}
+terms_healthy <- read_csv("data/aging_terms.csv") |> 
+  mutate(Platform = str_replace(Platform, "Olink Explore|Olink HT", "Olink"))
+
+terms_disease <- read_csv("data/aging_terms_disease.csv") |> 
+  mutate(Platform = str_replace(Platform, "Olink Explore|Olink HT", "Olink"))
+
+combined_aging <- full_join(
+  terms_healthy |> select(Platform, Description, NES_Healthy = NES, p_Healthy = p.adjust),
+  terms_disease |> select(Platform, Description, NES_Disease = NES, p_Disease = p.adjust),
+  by = c("Platform", "Description")
+) |>
+  mutate(
+    NES_Healthy = if_else(is.na(NES_Healthy), 0, NES_Healthy),
+    NES_Disease = if_else(is.na(NES_Disease), 0, NES_Disease),
+    p_Healthy = if_else(is.na(p_Healthy), 1, p_Healthy),
+    p_Disease = if_else(is.na(p_Disease), 1, p_Disease),
+    min_p = pmin(p_Healthy, p_Disease, na.rm = TRUE),
+    sig_size = -log10(min_p),
+    sig_size = if_else(is.infinite(sig_size), 20, sig_size),
+    sig_size = if_else(is.na(sig_size) | sig_size < 0.1, 0.5, sig_size)
+  ) |>
+  filter(NES_Healthy >= 0, NES_Disease >= 0)
+
+target_pathways <- c(
+  "positive regulation of telomere maintenance via telomerase",
+  "RHO GTPase cycle",
+  "mitotic cell cycle",
+  "APC/C:Cdc20 mediated degradation of Securin",
+  "Platelet activation",
+  "structural constituent of muscle"
+)
+
+top_labels <- combined_aging |>
+  filter(Description %in% target_pathways)
+
+pal_platform <- c("Olink" = "#6FC2EE", "SomaScan" = "#D82F88")
+
+combined_plot <- ggplot(combined_aging, aes(x = NES_Healthy, y = NES_Disease, color = Platform)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40", linewidth = 0.8) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey40", linewidth = 0.8) +
+  geom_point(aes(size = sig_size), alpha = 0.7) +
+  coord_cartesian(xlim = c(0, 2), ylim = c(0, 2)) +
+  geom_text_repel(
+    data = top_labels,
+    aes(label = scales::label_wrap(35)(Description)),
+    size = 4,
+    fontface = "bold",
+    color = "grey10", 
+    box.padding = 0.8,
+    point.padding = 0.5,
+    max.overlaps = Inf,
+    min.segment.length = 0,
+    show.legend = FALSE
+  ) +
+  
+  scale_color_manual(values = pal_platform) +
+  scale_size_continuous(range = c(2, 8), name = expression(Max~-log[10](p.adjust))) +
+  labs(
+    x = "NES (Healthy Old vs. Healthy Young)",
+    y = "NES (Healthy Old vs. Diseased Old)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.title = element_text(size = 12, face = "bold"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 11, hjust = 0.5, color = "grey30"),
+    legend.position = "bottom",
+    legend.box = "horizontal"
+  )
+
+print(combined_plot)
+ggsave("results/quadrant_aging_vs_disease_specific.png", combined_plot, width = 25, height = 20, units = "cm")
+```
+
+## Clock
+
+```{r}
+healthy_train <- data_all |>
+  filter(DAid %in% healthy_ids)
+
+feature_cols <- data_all |>
+  select(-any_of(c("DAid", "Age"))) |>
+  select(where(is.numeric)) |>
+  names()
+
+keep_features <- feature_cols[
+  vapply(feature_cols, function(col) {
+    x <- healthy_train[[col]]
+    any(!is.na(x)) && stats::var(x, na.rm = TRUE) > 0
+  }, logical(1))
+]
+
+train_medians <- vapply(keep_features, function(col) {
+  stats::median(healthy_train[[col]], na.rm = TRUE)
+}, numeric(1))
+
+impute_with_train_median <- function(df, features, medians) {
+  out <- df
+  for (col in features) {
+    miss <- is.na(out[[col]])
+    if (any(miss)) {
+      out[[col]][miss] <- medians[[col]]
+    }
+  }
+  out
+}
+
+healthy_train_imp <- impute_with_train_median(healthy_train, keep_features, train_medians)
+
+x_train <- as.matrix(healthy_train_imp[, keep_features, drop = FALSE])
+y_train <- healthy_train_imp$Age
+
+cv_lasso <- glmnet::cv.glmnet(
+  x = x_train,
+  y = y_train,
+  alpha = 1,
+  family = "gaussian",
+  nfolds = 5,
+  standardize = TRUE
+)
+
+disease_levels <- sample_meta_filt |>
+  filter(!Disease %in% c("Healthy", "Longevity"), !is.na(Disease)) |>
+  distinct(Disease) |>
+  pull(Disease)
+
+disease_pred_list <- lapply(disease_levels, function(dz) {
+  ids_dz <- sample_meta_filt |>
+    filter(Disease == dz) |>
+    pull(DAid) |>
+    unique()
+
+  dat_dz <- data_all |>
+    filter(DAid %in% ids_dz) |>
+    select(any_of(c("DAid", "Age")), all_of(keep_features))
+
+  dat_dz_imp <- impute_with_train_median(dat_dz, keep_features, train_medians)
+
+  pred_dz <- as.numeric(
+    predict(
+      cv_lasso,
+      newx = as.matrix(dat_dz_imp[, keep_features, drop = FALSE]),
+      s = "lambda.1se"
+    )
+  )
+
+  tibble(
+    DAid = dat_dz_imp$DAid,
+    Disease = dz,
+    Age = dat_dz_imp$Age,
+    pred_age = pred_dz,
+    offset = (pred_age - Age)
+  )
+})
+
+disease_preds <- bind_rows(disease_pred_list)
+
+disease_burden <- disease_preds |>
+  summarize(
+    n = dplyr::n(),
+    mean_offset = mean(offset, na.rm = TRUE),
+    median_offset = median(offset, na.rm = TRUE),
+    pct_older = mean(offset > 0, na.rm = TRUE),
+    rsq = cor(pred_age, Age, use = "complete.obs")^2,
+    .by = Disease
+  ) |>
+  mutate(
+    burden_class = case_when(
+      median_offset > 2 ~ "Looks older",
+      median_offset < -2 ~ "Looks younger",
+      TRUE ~ "Same age"
+    )
+  ) |>
+  arrange(desc(median_offset))
+
+# Assign disease class for each disease
+disease_class_palette <- c(
+  "Healthy" = "#C9B28F",
+  "Cardiovascular" = "#ED936B",
+  "Metabolic" = "#E0C59A",
+  "Cancer" = "#919FC7",
+  "Neurologic" = "#7DC0A6",
+  "Infection" = "#F9DA56",
+  "Autoimmune" = "#DA8EC0"
+)
+
+disease_class_map <- sample_meta_filt |>
+  filter(!is.na(Disease), !is.na(Class)) |>
+  distinct(Disease, Class)
+
+disease_preds_plot <- disease_preds |>
+  left_join(disease_class_map, by = "Disease") |>
+  mutate(Disease = factor(Disease, levels = rev(disease_burden$Disease)))
+
+p_burden <- ggplot(disease_preds_plot, aes(x = Disease, y = offset)) +
+  geom_boxplot(aes(fill = Class), outlier.shape = NA, width = 0.6) +
+  geom_jitter(color = "black", alpha = 0.4, size = 1, width = 0.12) +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.5) +
+  coord_flip() +
+  scale_fill_manual(values = disease_class_palette, drop = FALSE) +
+  labs(
+    x = "Disease",
+    y = "Offset (Predicted age - Chronological age) / Chronological Age",
+    fill = "Disease class"
+  ) +
+  theme_hd() +
+  theme(axis.text.x = element_text(hjust = 0.5))
+
+ggsave("results/disease_burden_swarm_nonagecorrected.pdf", plot = p_burden, width = 8, height = 8)
+p_burden
+```
