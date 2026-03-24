@@ -15,6 +15,8 @@ library(stringr)
 library(gridExtra)
 library(tidymodels)
 library(vip)
+
+source("scripts/functions/themes_levels_palettes.R")
 ```
 
 ```{r}
@@ -72,42 +74,7 @@ diff_exp_proteins <- read_tsv("data/de_diseases_olink_soma_overlapping.tsv")
 hpa_metadata <- read_tsv("data/proteinatlas.tsv")
 ```
 
-Palettes
 
-```{r}
-pal_secreted <- c(
-  "Actively secreted to blood" = "#B24F52",
-  "Secreted in female reproductive system" = "#2A9D8F",
-  "Unknown secreted location" = "#7C7C7C",
-  "Secreted in male reproductive system" = "#A9D18E",
-  "Secreted to extracellular matrix" = "#A6CEE3",
-  "Secreted to digestive system" = "#264653",
-  "Secreted in brain" = "#F4A5AE",
-  "Secreted to other locations" = "#B89B74",
-  "Digestive system" = "#264653",
-  "Intracellular and Membrane" = "#457B9D",
-  "Not part of the secretome annotation" = "lightgrey"
-)
-
-disease_class <- c(
-  "Global" = "#E5E5E5",  # Add a color for Global
-  "Healthy" = "#C9B28F",
-  "Cardiovascular" = "#ED936B",
-  "Metabolic" = "#E0C59A",
-  "Cancer" = "#919FC7",
-  "Neurologic" = "#7DC0A6",
-  "Psychiatric" = "#7DC0A6",
-  "Infection" = "#F9DA56",
-  "Autoimmune" = "#DA8EC0"
-)
-```
-
-Define order:
-
-```{r}
-class_order <- c("Global", "Healthy", "Cardiovascular", "Metabolic", "Cancer", "Neurologic", "Autoimmune", "Infection")
-disease_class_order <- c("Healthy", "Cardiovascular", "Metabolic", "Cancer", "Neurologic", "Autoimmune", "Infection")
-```
 
 Select common proteins and DAids.
 
@@ -410,7 +377,7 @@ for (protein in unique(scatter_data$Assay)) {
     ) +
     scale_x_continuous(breaks = scales::breaks_pretty()) +
     scale_y_continuous(breaks = scales::breaks_pretty()) +
-    scale_color_manual(values = disease_class) +
+    scale_color_manual(values = pal_class) +
     facet_wrap(~ Class, nrow = 1, scales = "free") +
     labs(x = "Olink (NPX)", y = "SomaScan (log2RFU)") +
     theme_hd() +
@@ -468,7 +435,7 @@ color_bar <- ggplot(
   aes(x = Disease, y = 1, fill = Class)
 ) +
   geom_tile() +
-  scale_fill_manual(values = disease_class) +
+  scale_fill_manual(values = pal_class) +
   theme_void() +
   theme(
     legend.position = "None",
@@ -510,7 +477,7 @@ for (protein in boxplot_proteins) {
     mutate(
       Disease_factor = factor(Disease, levels = levels(combined_data_filtered$Disease)),
       x_pos = as.numeric(Disease_factor) - 0.5,
-      label_color = disease_class[Class]
+      label_color = pal_class[Class]
     )
 
   boxplot <- ggplot(combined_data_filtered, aes(x = Disease, y = Value, fill = Class)) +
@@ -534,7 +501,7 @@ for (protein in boxplot_proteins) {
              "SomaScan" = "SomaScan (log2RFU)"
            ))) + 
     labs(y = protein) +
-    scale_fill_manual(values = disease_class) +
+    scale_fill_manual(values = pal_class) +
     scale_color_identity() +
     scale_alpha_identity() +
     scale_y_continuous(breaks = function(limits) {
@@ -676,12 +643,7 @@ summary_stats <- bind_rows(correlation_results_disease) |>
 corr_by_disease_plot <- ggplot(summary_stats, aes(x = Disease, y = mean_corr, color = Category)) +
   geom_point(position = position_dodge(width = 0), size = 1.5) +
   scale_color_manual(
-    values = c(
-      "Significant in Olink" = "#6FC2EE",
-      "Significant in SomaScan" = "#D82F88",
-      "Significant in both" = "#312F7C",
-      "Not significant in both" = "#E5E5E5"
-    ),
+    values = ,
     name = "Significance"
   ) +
   labs(x = NULL, y = "Mean ρ") +
@@ -721,7 +683,7 @@ rescue_results_disease <- correlation_by_disease |>
 
 rescued_bar_plot <- ggplot(rescue_results_disease, aes(x = Disease, y = n_rescued)) +
   geom_bar(aes(fill = Class), stat = "identity", color = "black") +
-  scale_fill_manual(values = disease_class) +
+  scale_fill_manual(values = pal_class) +
   scale_y_continuous(breaks = c(0, 300), limits = c(0, NA)) +
   labs(x = NULL, y = "# Proteins") +
   coord_flip() +
