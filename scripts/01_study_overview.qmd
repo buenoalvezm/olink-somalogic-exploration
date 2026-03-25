@@ -13,12 +13,15 @@ library(patchwork)
 library(HDAnalyzeR)
 library(mbaRtools) 
 library(embed)
+library(readxl)
 
 # Data
 data_soma_wide <- read_tsv("../../Data/Somascan/processed/data_phase2_somalogic_curated_subset_20251031.tsv")
 data_olink <- read_tsv("../../Data/Olink/processed/data_phase2_HT_bridged_curated_subset_20251031.tsv")
 meta_soma <- read_tsv("../../Data/Somascan/processed/meta_phase2_somalogic_elod_20251028.tsv")
 meta <- read_tsv("../../Data/metadata/meta_phase2_hpav25_20251031.tsv")
+manifest <- read_excel("../../Data/metadata/samples_2025-05-12.xlsx")
+meta_bamse <- read_tsv("../../Data/metadata/bamse_meta_ht_phase2.tsv")
 
 # Soma data in long format
 data_soma <- 
@@ -51,6 +54,55 @@ meta <- meta |> mutate(Disease = factor(Disease, levels = rev(disease_levels)))
 ```
 
 # Sample overview
+
+## Number of samples and diseases
+
+```{r}
+# Common Olink + Soma
+common_samples <- 
+  data_soma |> 
+  filter(DAid %in% data_olink$DAid) |> 
+  distinct(DAid) |> 
+  left_join(meta) 
+
+meta |> distinct(DAid) |> nrow()
+data_olink |> distinct(DAid) |> nrow()
+common_samples|> distinct(DAid) |> nrow()
+
+
+# Disease + healthy (n)
+individuals_non_longitudinal <- 
+  common_samples|> 
+  filter(!Cohort %in% c("BAMS", "PREG")) |> 
+  nrow()
+
+# Pregnancy (n)
+meta_pregnancy <- 
+    manifest |> 
+    filter(Cohort == "PREG") |> 
+    separate(`Vial barcode`, into = c("Subject", "Trimester"), sep = "_", remove = FALSE) |> 
+    select(DAid, Subject, Age, Sex, BMI, Trimester)
+
+individuals_pregnancy <- 
+  common_samples|> 
+  filter(Cohort == "PREG") |> 
+  distinct(DAid) |> 
+  left_join(meta_pregnancy) |> 
+  count(Subject) |> 
+  arrange(n) |> 
+  #count(Trimester) |> 
+  nrow() # 6 pregnancy samples just 2 visits
+
+# BAMSE (n)
+individuals_bamse <- 
+  meta_bamse |> 
+  filter(DAid %in% common_samples$DAid) |> 
+  count(Subject) |> 
+  arrange(n) |> 
+  nrow()
+
+individuals_non_longitudinal + individuals_bamse + individuals_pregnancy
+```
 
 ## Pie chart
 
@@ -181,6 +233,26 @@ protein_lists <- list(
 )
 
 plot_eulerr(protein_lists, palette_name = "platform_simple_pal", save_path = "results/Manuscript-figures/Fig1c_overlap.pdf")
+
+# List number of assays for manuscript
+overlap_aptamer_level <- 
+  meta_soma |> 
+  distinct(AptName, EntrezGeneSymbol)  |>
+  filter(EntrezGeneSymbol %in% ht_assays) |> 
+  pull(AptName)
+
+
+assay_summary <- tibble(
+  dataset = c("Olink", "SomaScan", "Overlap", "Overlap - aptamer level"),
+  n_assays = c(
+    length(ht_assays),
+    length(soma_assays),
+    length(overlapping_assays),
+    length(overlap_aptamer_level)
+  )
+)
+
+assay_summary
 ```
 
 # Protein concentration
@@ -214,18 +286,30 @@ ggsave("results/Manuscript-figures/Fig1d_protein_rank.pdf", h = 3, w =10)
 ```{r}
 data_soma |> 
     distinct(Assay, AptName) |> 
-    filter(Assay %in% overlapping_assays) |> 
+        filter(Assay %in% overlapping_assays) |> 
     count(Assay, name = "n_aptamers") |> 
-    arrange(-n_aptamers) |> 
-    #filter(n_aptamers > 1) |> 
-    count(n_aptamers, name = "n_proteins") |> 
-    mutate(n_aptamers = factor(n_aptamers)) |> 
-    ggplot(aes(fct_reorder(n_aptamers, n_proteins), n_proteins)) + 
-    geom_col(fill = "#9997C0") +
-    geom_text(aes(label = n_proteins, y = n_proteins + 20)) +
-    labs(x = "Number of aptamers", y = "Number of proteins") +
-    coord_flip() +
-    theme_hpa()
+  filter(n_aptamers > 1) |> nrow()
+  
+library(dplyr)
+library(ggplot2)
+library(forcats)
+
+data_soma |> 
+  distinct(Assay, AptName) |> 
+  filter(Assay %in% overlapping_assays) |> 
+  count(Assay, name = "n_aptamers") |> 
+  arrange(-n_aptamers) |> 
+  mutate(
+n_aptamers = if_else(n_aptamers >= 4, "4+", as.character(n_aptamers)),
+    n_aptamers = factor(n_aptamers, levels = c("1", "2", "3", "4+"))
+  ) |> 
+  count(n_aptamers, name = "n_proteins") |> 
+  ggplot(aes(fct_reorder(n_aptamers, n_proteins), n_proteins)) + 
+  geom_col(fill = "#9997C0") +
+  geom_text(aes(label = n_proteins, y = n_proteins + 20)) +
+  labs(x = "Number of aptamers", y = "Number of proteins") +
+  coord_flip() +
+  theme_hpa()
 
 ggsave("results/Manuscript-figures/Fig1e_aptamers_protein.pdf", h = 3, w =3.5)
 ```

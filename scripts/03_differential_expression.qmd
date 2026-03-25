@@ -348,9 +348,9 @@ de_diseases <-
   })
 
 
-write_tsv(de_diseases, "data/processed/de_diseases_olink_soma.tsv") # long format, combined
+write_tsv(de_diseases, "data/processed/de_diseases_olink_soma_v3.tsv") # long format, combined
 
-de_diseases <- read_tsv("data/processed/de_diseases_olink_soma.tsv") # long format, combined
+#de_diseases <- read_tsv("data/processed/de_diseases_olink_soma.tsv") # long format, combined
 
 
 # Overlapping - wide format
@@ -366,9 +366,9 @@ de_diseases_overlapping <-
     mutate(Disease = factor(Disease, levels = diseases)) |> 
     arrange(Disease, Assay)
 
-write_tsv(de_diseases_overlapping, "data/processed/de_diseases_olink_soma_overlapping.tsv") # wide format, overlapping
+write_tsv(de_diseases_overlapping, "data/processed/de_diseases_olink_soma_overlapping_v3.tsv") # wide format, overlapping
 
-de_diseases_overlapping <- read_tsv("data/processed/de_diseases_olink_soma_overlapping.tsv") # wide format, overlapping
+#de_diseases_overlapping <- read_tsv("data/processed/de_diseases_olink_soma_overlapping.tsv") # wide format, overlapping
 
 
 
