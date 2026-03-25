@@ -286,18 +286,30 @@ ggsave("results/Manuscript-figures/Fig1d_protein_rank.pdf", h = 3, w =10)
 ```{r}
 data_soma |> 
     distinct(Assay, AptName) |> 
-    filter(Assay %in% overlapping_assays) |> 
+        filter(Assay %in% overlapping_assays) |> 
     count(Assay, name = "n_aptamers") |> 
-    arrange(-n_aptamers) |> 
-    #filter(n_aptamers > 1) |> 
-    count(n_aptamers, name = "n_proteins") |> 
-    mutate(n_aptamers = factor(n_aptamers)) |> 
-    ggplot(aes(fct_reorder(n_aptamers, n_proteins), n_proteins)) + 
-    geom_col(fill = "#9997C0") +
-    geom_text(aes(label = n_proteins, y = n_proteins + 20)) +
-    labs(x = "Number of aptamers", y = "Number of proteins") +
-    coord_flip() +
-    theme_hpa()
+  filter(n_aptamers > 1) |> nrow()
+  
+library(dplyr)
+library(ggplot2)
+library(forcats)
+
+data_soma |> 
+  distinct(Assay, AptName) |> 
+  filter(Assay %in% overlapping_assays) |> 
+  count(Assay, name = "n_aptamers") |> 
+  arrange(-n_aptamers) |> 
+  mutate(
+n_aptamers = if_else(n_aptamers >= 4, "4+", as.character(n_aptamers)),
+    n_aptamers = factor(n_aptamers, levels = c("1", "2", "3", "4+"))
+  ) |> 
+  count(n_aptamers, name = "n_proteins") |> 
+  ggplot(aes(fct_reorder(n_aptamers, n_proteins), n_proteins)) + 
+  geom_col(fill = "#9997C0") +
+  geom_text(aes(label = n_proteins, y = n_proteins + 20)) +
+  labs(x = "Number of aptamers", y = "Number of proteins") +
+  coord_flip() +
+  theme_hpa()
 
 ggsave("results/Manuscript-figures/Fig1e_aptamers_protein.pdf", h = 3, w =3.5)
 ```
