@@ -150,7 +150,7 @@ global_cor_plot_secretome <- ggplot(correlation_secretome, aes(x = correlation, 
   ylim(0, 650) +
   labs(
     x = "Baseline Correlations",
-    y = "# Proteins"
+    y = "# Protein-Aptamer"
   ) +
   theme_hd() +
   theme(
@@ -244,13 +244,85 @@ legend <- get_legend(global_cor_plot_secretome +
 global_cor_plot_secretome_no_legend <- global_cor_plot_secretome_no_legend + labs(tag = "A")
 max_cor_plot_secretome_no_legend <- max_cor_plot_secretome_no_legend + labs(tag = "B")
 
+# Compute % above LOD for each combined protein-aptamer pair
+pair_lod_summary <- olink |>
+  inner_join(soma, by = c("DAid", "Assay")) |>
+  group_by(Assay, AptName) |>
+  summarise(
+    pct_above_lod = mean((NPX > LOD) & (Value > eLOD), na.rm = TRUE) * 100,
+    .groups = "drop"
+  )
+
+lod_bin_summary <- correlation |>
+  select(Assay, AptName, correlation) |>
+  inner_join(pair_lod_summary, by = c("Assay", "AptName")) |>
+  mutate(
+    lod_bin = pmin(floor(pct_above_lod / 10) * 10, 100)
+  ) |>
+  group_by(lod_bin) |>
+  summarise(
+    count = n(),
+    median_spearman = median(correlation, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  complete(
+    lod_bin = seq(0, 100, by = 10),
+    fill = list(count = 0, median_spearman = NA_real_)
+  )
+
+max_count_lod <- max(lod_bin_summary$count, na.rm = TRUE)
+
+lod_performance_plot <- ggplot(lod_bin_summary, aes(x = lod_bin)) +
+  geom_col(aes(y = count, fill = "Count"), width = 8, alpha = 0.6) +
+  geom_line(
+    aes(y = median_spearman * max_count_lod, color = "Median Spearman", group = 1),
+    linewidth = 0.8
+  ) +
+  geom_point(
+    aes(y = median_spearman * max_count_lod, color = "Median Spearman"),
+    size = 1.6
+  ) +
+  scale_x_continuous(
+    breaks = seq(0, 100, by = 10),
+    limits = c(-4, 104)
+  ) +
+  scale_y_continuous(
+    name = "Count",
+    sec.axis = sec_axis(~ . / max_count_lod, name = "Median Spearman Correlation")
+  ) +
+  scale_fill_manual(values = c("Count" = "#66B2A3"), name = NULL) +
+  scale_color_manual(values = c("Median Spearman" = "#3F3F7F"), name = NULL) +
+  labs(
+    x = "Above LOD (%)",
+    y = "# Protein-Aptamer",
+    tag = "C"
+  ) +
+  theme_hd() +
+  theme(
+    axis.text = element_text(size = 6),
+    axis.text.x = element_text(vjust = 1, hjust = 0.5),
+    axis.title = element_text(size = 8),
+    axis.ticks.length = unit(4, "pt"),
+    legend.position = c(0.18, 0.95),
+    legend.justification = c(0, 1),
+    legend.text = element_text(size = 6),
+    legend.key.size = unit(6, "pt"),
+    plot.margin = margin(t = 5, r = 5, b = 5, l = 5)
+  )
+
 # Combine plots with arrow in between
 combined_secretome_plot <- global_cor_plot_secretome_no_legend + arrow_plot + max_cor_plot_secretome_no_legend +
   plot_layout(ncol = 3, widths = c(1, 0.1, 1)) +
   plot_annotation(theme = theme(plot.margin = margin(t = 5, r = 5, b = 0, l = 5)))
 
+# Add Panel C in the same row, keeping A->B orientation unchanged
+top_combined_with_lod <- global_cor_plot_secretome_no_legend + arrow_plot +
+  max_cor_plot_secretome_no_legend + lod_performance_plot +
+  plot_layout(ncol = 4, widths = c(1, 0.1, 1, 1)) +
+  plot_annotation(theme = theme(plot.margin = margin(t = 5, r = 5, b = 0, l = 5)))
+
 # Add legend at bottom
-final_combined_plot <- combined_secretome_plot / legend +
+final_combined_plot <- top_combined_with_lod / legend +
   plot_layout(heights = c(1, 0.05))
 
 ggsave(
@@ -420,7 +492,7 @@ for (i in seq_along(protein_plots)) {
   }
 }
 
-protein_plots[[1]][[1]] <- protein_plots[[1]][[1]] + labs(tag = "C")
+protein_plots[[1]][[1]] <- protein_plots[[1]][[1]] + labs(tag = "D")
 
 scatter_section <- wrap_plots(protein_plots, ncol = 1)
 scatter_wrapped <- wrap_elements(full = scatter_section)
@@ -532,8 +604,8 @@ wrapped_ptn <- wrap_elements(full = boxplot_list[["PTN"]])
 
 boxplot_combined <- wrapped_fgr + wrapped_ptn
 
-boxplot_combined[[1]] <- boxplot_combined[[1]] + labs(tag = "D")
-boxplot_combined[[2]] <- boxplot_combined[[2]] + labs(tag = "E")
+boxplot_combined[[1]] <- boxplot_combined[[1]] + labs(tag = "E")
+boxplot_combined[[2]] <- boxplot_combined[[2]] + labs(tag = "F")
 
 combined_bottom <- scatter_wrapped / boxplot_combined +
   plot_layout(heights = c(length(protein_plots)/2, 1))
@@ -710,10 +782,10 @@ wrapped_fgr <- wrap_elements(full = boxplot_list[["FGR"]])
 wrapped_ptn <- wrap_elements(full = boxplot_list[["PTN"]])
 
 boxplot_combined <- wrapped_fgr / wrapped_ptn
-boxplot_combined[[1]] <- boxplot_combined[[1]] + labs(tag = "D")
-boxplot_combined[[2]] <- boxplot_combined[[2]] + labs(tag = "E")
+boxplot_combined[[1]] <- boxplot_combined[[1]] + labs(tag = "E")
+boxplot_combined[[2]] <- boxplot_combined[[2]] + labs(tag = "F")
 
-corr_by_disease_plot <- corr_by_disease_plot + labs(tag = "F")
+corr_by_disease_plot <- corr_by_disease_plot + labs(tag = "G")
 
 combined_corr_plot <- corr_by_disease_plot + rescued_bar_plot +
   plot_layout(widths = c(1, 0.3))
@@ -1086,4 +1158,147 @@ p <- ggplot(scatter_data, aes(x = olink_soma, y = max_intra_soma)) +
 p_marginal <- ggMarginal(p, type = "histogram", bins = 30, fill = "lightblue")
 
 ggsave("results/olink_soma_intrasoma_scatter.png", p_marginal, width = 10, height = 10, units = "cm", dpi = 300, bg = "white")
+```
+
+## CRP plot
+
+```{r}
+# Soma -----
+soma_wide <- read_tsv("data/data_phase2_somalogic_curated_subset_20251031.tsv")
+soma_meta <- read_tsv("data/meta_phase2_somalogic_elod_20251028.tsv")
+
+soma_all <- soma_wide |>
+  pivot_longer(cols = -c("DAid"), names_to = "AptName", values_to = "Value") |>
+  left_join(soma_meta |> filter(Organism == "Human") |> select(AptName,eLOD, EntrezGeneSymbol), by = "AptName") |>
+  rename(Assay = EntrezGeneSymbol)
+
+soma_all <- soma_all |> filter(DAid %in% common_daids)
+
+rm(soma_wide)
+
+protein <- "CRP"
+
+soma_protein <- soma_all |>
+  filter(Assay == protein) |>
+  group_by(DAid, Assay) |>
+  summarise(Value = mean(Value, na.rm = TRUE), .groups = "drop") |>
+  mutate(Technology = "SomaScan")
+
+if (nrow(soma_protein) == 0) {
+  stop(paste0("No rows available for assay '", protein, "' in soma_all."))
+}
+
+plot_data <- soma_protein |>
+  inner_join(
+    meta |>
+      select(DAid, Disease, Class) |>
+      mutate(Disease = if_else(stringr::str_starts(Disease, "BAMSE"), "BAMSE", Disease)),
+    by = "DAid"
+  )
+
+if (nrow(plot_data) == 0) {
+  stop(paste0("No rows available for assay '", protein, "' after joining metadata."))
+}
+
+meta_plot <- meta |>
+  select(Disease, Class) |>
+  mutate(Disease = if_else(stringr::str_starts(Disease, "BAMSE"), "BAMSE", Disease)) |>
+  distinct(Disease, Class)
+
+disease_levels <- meta_plot |>
+  mutate(Class = factor(Class, levels = disease_class_order)) |>
+  arrange(Class, Disease) |>
+  pull(Disease) |>
+  unique()
+
+plot_data <- plot_data |>
+  mutate(Disease = factor(Disease, levels = disease_levels))
+
+highlight_disease <- if (protein == "CRP") {
+  c(
+    "Healthy",
+    "Longevity",
+    "Acute COVID",
+    "Malaria",
+    "Acute venous thromboembolism",
+    "Cerebral venous thrombosis"
+  )
+}
+
+combined_data_filtered <- plot_data |>
+  mutate(
+    highlight = Disease %in% highlight_disease,
+    edge_color = ifelse(highlight, "#000000", "#00000003"),
+    point_color = ifelse(highlight, "#000000", "#d3d3d3")
+  )
+
+label_data <- combined_data_filtered |>
+  filter(highlight) |>
+  distinct(Disease, Class) |>
+  mutate(
+    Disease_factor = factor(Disease, levels = levels(combined_data_filtered$Disease)),
+    x_pos = as.numeric(Disease_factor) - 0.5,
+    label_color = disease_class[Class]
+  )
+
+color_bar <- ggplot(
+  meta_plot |>
+    mutate(Disease = factor(Disease, levels = disease_levels)),
+  aes(x = Disease, y = 1, fill = Class)
+) +
+  geom_tile() +
+  scale_fill_manual(values = disease_class, drop = FALSE) +
+  theme_void() +
+  theme(
+    legend.position = "none",
+    plot.margin = margin(t = 0, r = 5, b = 0, l = 5)
+  )
+
+boxplot <- ggplot(combined_data_filtered, aes(x = Disease, y = Value, fill = Class)) +
+  geom_boxplot(
+    aes(alpha = ifelse(highlight, 1, 0.3), color = edge_color),
+    outlier.shape = NA,
+    linewidth = 0.5
+  ) +
+  geom_jitter(
+    aes(alpha = ifelse(highlight, 0.3, 0.1), color = point_color),
+    width = 0.1,
+    size = 0.1
+  ) +
+  geom_text(
+    data = label_data,
+    aes(x = x_pos, y = Inf, label = stringr::str_wrap(Disease, width = 15), color = label_color),
+    hjust = 1, vjust = 1, fontface = "bold", size = 2, lineheight = 0.9
+  ) +
+  labs(y = protein) +
+  scale_fill_manual(values = disease_class, drop = FALSE) +
+  scale_color_identity() +
+  scale_alpha_identity() +
+  scale_y_continuous(breaks = function(limits) {
+    step <- ifelse((limits[2] - limits[1]) > 5, 2, 1)
+    seq(floor(limits[1]), ceiling(limits[2]), by = step)
+  }) +
+  theme_hd() +
+  theme(
+    legend.position = "none",
+    axis.text = element_text(size = 6),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.line.x = element_blank(),
+    axis.title = element_text(size = 8),
+    axis.title.x = element_blank(),
+    axis.ticks.length = unit(4, "pt"),
+    plot.margin = margin(t = 5, r = 5, b = 5, l = 5)
+  )
+
+boxplotwith_colorbar <- boxplot / color_bar +
+plot_layout(heights = c(10, 0.2))
+boxplotwith_colorbar
+
+ggsave(
+  filename = "results/CRP_somascan_plot.pdf",
+  width = 10,
+  height = 4,
+  units = "cm"
+)
 ```
